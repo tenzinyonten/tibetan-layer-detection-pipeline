@@ -472,11 +472,24 @@ def infer_book_id(path: Path) -> str:
     collide on it and silently overwrite each other's output. Use the
     grandparent folder name instead (v001.txt's grandparent, e.g.
     P000201.opf/P000201.opf/base/v001.txt -> P000201), stripping a trailing
-    ".opf". Falls back to the plain filename stem for any other layout."""
+    ".opf". Falls back to the plain filename stem for any other layout.
+
+    If the filename is v001.txt but the grandparent folder does NOT end in
+    ".opf", the path isn't a real OpenPecha layout (e.g. a v001.txt copied
+    directly into a scratch folder) and the grandparent name is likely
+    unrelated to the book (a prior bug used it anyway and produced a
+    directory name like "tmp" as the book_id). Warn instead of guessing, and
+    fall back to the plain stem, which is what the caller already did for
+    every other case."""
     if path.stem == "v001":
         grandparent = path.parent.parent.name
-        if grandparent:
-            return grandparent[:-4] if grandparent.endswith(".opf") else grandparent
+        if grandparent.endswith(".opf"):
+            return grandparent[:-4]
+        print(f"  [warn] {path}: named v001.txt but its grandparent folder "
+              f"('{grandparent}') doesn't end in '.opf', so it doesn't look "
+              f"like a real OpenPecha layout; using the generic book_id "
+              f"'v001' instead of that folder name. This book may collide "
+              f"with another v001.txt in a --dir batch.", file=sys.stderr)
     return path.stem
 
 
@@ -512,7 +525,18 @@ def main(argv=None) -> int:
         raise SystemExit("pass --layers <name...> or --all")
     layer_names = list(LAYERS) if args.all else args.layers
 
-    files = [args.text] if args.text else sorted(args.dir.glob("*.txt"))
+    if args.text:
+        files = [args.text]
+    else:
+        # Flat *.txt files (e.g. already-renamed books) plus raw, un-renamed
+        # OpenPecha exports anywhere under args.dir (rglob("base/v001.txt")
+        # == glob("**/base/v001.txt")): a directory of P000201.opf/P000201.opf/
+        # base/v001.txt-style book folders now works directly, with no manual
+        # renaming step, because infer_book_id() reads the pecha id off each
+        # file's own grandparent folder.
+        flat = set(args.dir.glob("*.txt"))
+        raw_opf = set(args.dir.rglob("base/v001.txt"))
+        files = sorted(flat | raw_opf)
     if not files:
         raise SystemExit(f"no .txt files found in {args.dir}")
 
