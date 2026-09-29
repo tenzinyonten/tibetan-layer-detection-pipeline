@@ -56,8 +56,10 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from build_tsawa_dataset import sliding_windows, special_token_ids  # noqa: E402
-from eval_viterbi_iou import spans_from_bio, transition_matrix, viterbi  # noqa: E402
+from common.windows import (  # noqa: E402
+    pack_window_for_inference, sliding_windows, special_token_ids,
+)
+from common.decode import spans_from_bio, transition_matrix, viterbi  # noqa: E402
 
 CONTENT_MAX = 8190  # max_length 8192 - CLS - SEP, shared by every layer here
 
@@ -185,20 +187,6 @@ def spans_from_bioe(seq: np.ndarray) -> list[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 # text -> windows -> model -> character spans
 # ---------------------------------------------------------------------------
-
-def pack_window_for_inference(input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, max_length):
-    """Like build_tsawa_dataset.pack_window, minus the training-only `labels`
-    column (there is nothing to label at inference time)."""
-    content_ids = input_ids[w_start:w_end]
-    content_off = offsets[w_start:w_end]
-    ids = [cls_id] + content_ids + [sep_id]
-    mask = [1] * len(ids)
-    pad_n = max_length - len(ids)
-    if pad_n:
-        ids = ids + [pad_id] * pad_n
-        mask = mask + [0] * pad_n
-    return ids, mask, content_off
-
 
 def merge_char_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Union-merge spans that touch or overlap. Spans come from overlapping
@@ -478,6 +466,20 @@ body {{ font: 15px/1.9 system-ui, sans-serif; max-width: 900px; margin: 24px aut
     return path
 
 
+def infer_book_id(path: Path) -> str:
+    """OpenPecha book text is always base/v001.txt, so the filename stem
+    ("v001") is useless as a book id: every book in a --dir batch would
+    collide on it and silently overwrite each other's output. Use the
+    grandparent folder name instead (v001.txt's grandparent, e.g.
+    P000201.opf/P000201.opf/base/v001.txt -> P000201), stripping a trailing
+    ".opf". Falls back to the plain filename stem for any other layout."""
+    if path.stem == "v001":
+        grandparent = path.parent.parent.name
+        if grandparent:
+            return grandparent[:-4] if grandparent.endswith(".opf") else grandparent
+    return path.stem
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -517,7 +519,7 @@ def main(argv=None) -> int:
     summary = []
     for fp in files:
         text = fp.read_text(encoding="utf-8")
-        book_id = fp.stem
+        book_id = infer_book_id(fp)
         t0 = time.time()
         res = detect(text, book_id, layer_names, args.device)
         elapsed = time.time() - t0

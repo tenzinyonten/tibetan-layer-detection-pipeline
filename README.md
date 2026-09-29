@@ -7,11 +7,13 @@ models on any Tibetan text and returns detected spans as character offsets.
 
 | Layer | Model | What it detects |
 |---|---|---|
-| Tsawa | BDRC/Bo-Tsawa-Detection | Root text (verse quoted and explained) |
-| Sabche | BDRC/Bo-Sabche-Detection | Outline headings |
-| Chapter | BDRC/Bo-Chapter-Detection | Chapter and section titles |
-| Quotation | BDRC/Bo-Quotation-Detection | Citations from other works |
-| Yigchung | BDRC/Bo-Yigchung-Detection | Small-print notes |
+| Tsawa | [BDRC/Bo-Tsawa-Detection](https://huggingface.co/BDRC/Bo-Tsawa-Detection) | Root text (verse quoted and explained) |
+| Sabche | [BDRC/Bo-Sabche-detection](https://huggingface.co/BDRC/Bo-Sabche-detection) | Outline headings |
+| Chapter | [BDRC/Bo-Chapter-Detection](https://huggingface.co/BDRC/Bo-Chapter-Detection) | Chapter and section titles |
+| Quotation | [BDRC/Bo-Quotation-Detection](https://huggingface.co/BDRC/Bo-Quotation-Detection) | Citations from other works |
+| Yigchung | [BDRC/Bo-Yigchung-Detection](https://huggingface.co/BDRC/Bo-Yigchung-Detection) | Small-print notes |
+
+Helper modules (windowing, BIO Viterbi decoding) extracted from the layer_detection repo live in `common/`, so the only runtime dependencies are `transformers` and `torch`.
 
 ## Installation
 
