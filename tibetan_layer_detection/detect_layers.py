@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
-"""detect_layers.py -- convenience wrapper: runs all three pipeline stages
-in sequence, for users who just want one command.
+"""detect_layers.py -- convenience CLI: runs all three pipeline stages in
+sequence, for users who just want one command (installed as `tibetan-detect`).
 
 The pipeline is split into three independently runnable stages, each its
-own module with its own CLI:
-    preprocess.py    text extraction        (.txt/.opf -> preprocessed/*.json)
-    infer.py         model inference        (preprocessed/*.json -> predictions/*.json)
-    postprocess.py   rendering + reporting  (predictions/*.json -> JSON/HTML/.opf + logs)
+own module with its own console script:
+    tibetan-preprocess    text extraction        (.txt/.opf -> preprocessed/*.json)
+    tibetan-infer         model inference        (preprocessed/*.json -> predictions/*.json)
+    tibetan-postprocess   rendering + reporting  (predictions/*.json -> JSON/HTML/.opf + logs)
 
 This file holds no detection logic of its own -- it builds the three
 intermediate folders under --out and calls each stage's own main() in turn.
-Run a stage directly (e.g. to re-render with a different --review-threshold
-without re-running inference, or to resume a crashed batch via Stage 2's
-checkpointing) instead of this wrapper when that's what you want.
+For a Python API that returns results in-process instead of writing files
+you manage yourself, see tibetan_layer_detection.detect() in __init__.py.
 
 Usage
 -----
-    # single document, all layers, both outputs
-    python detect_layers.py --text book.txt --all --json --html --out results/
-
-    # folder of books (renamed .txt files or raw OpenPecha layout), specific layers
-    python detect_layers.py --dir books/ --layers tsawa sabche --json --out results/
-
-    # write predictions back as OpenPecha layers too (layers/predicted/, not layers/v001/)
-    python detect_layers.py --text data/raw_opf/P000201.opf/P000201.opf/base/v001.txt \
+    tibetan-detect --text book.txt --all --json --html --out results/
+    tibetan-detect --dir books/ --layers tsawa sabche --json --out results/
+    tibetan-detect --text data/raw_opf/P000201.opf/P000201.opf/base/v001.txt \\
         --all --json --opf --out results/
 
 Under --out, this creates:
@@ -35,15 +29,10 @@ Under --out, this creates:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-import infer  # noqa: E402
-import postprocess  # noqa: E402
-import preprocess  # noqa: E402
-from layer_config import LAYERS  # noqa: E402
+from . import infer, postprocess, preprocess
+from .layer_config import LAYERS
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -57,7 +46,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--html", action="store_true")
     ap.add_argument("--opf", action="store_true",
                     help="also write predictions as OpenPecha layer YAML under "
-                         "layers/predicted/ (never layers/v001/); needs PyYAML")
+                         "layers/predicted/ (never layers/v001/)")
     ap.add_argument("--review-threshold", type=float, default=0.7)
     ap.add_argument("--out", type=Path, default=Path("results"))
     ap.add_argument("--device", default=None, help="default: cuda if available, else cpu")

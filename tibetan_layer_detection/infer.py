@@ -3,24 +3,24 @@
 
 Reads Stage 1's preprocessed/<book_id>.json files, runs each requested
 layer's model over the text (windowing, Viterbi decoding, confidence), and
-writes predictions/<book_id>.json per book. No text rendering and no
-filesystem writes back to any .opf here -- that's Stage 3's job; this stage
-only ever produces raw span predictions.
+writes predictions/<book_id>.json per book.
 
-Windowing (common/windows.py) and BIO/BIOE Viterbi decoding + confidence
-(common/decode.py) are this repo's own extracted, minimal-dependency copies
-(see those files) -- imported, not duplicated here.
+Windowing (.windows) and BIO/BIOE Viterbi decoding + confidence (.decode)
+are self-contained, dependency-light copies of the logic in this repo's
+common/build_tsawa_dataset.py and common/eval_viterbi_iou.py -- imported as
+package-relative modules here (not via a sys.path hack to a sibling
+directory) so this package is actually importable once pip-installed
+(site-packages only contains the package's own files, not this repo's
+top-level common/).
 
 Checkpointing: a book is skipped if predictions/<book_id>.json already
 exists, so a crashed run resumes where it left off. This checks file
-EXISTENCE only, not which layers that file covers -- if you change --layers
-partway through a batch, delete the old predictions files for books you want
-re-run with the new layer set; this script won't detect the mismatch itself.
+EXISTENCE only, not which layers that file covers.
 
-Usage
------
-    python infer.py --input preprocessed/ --out predictions/ --all
-    python infer.py --input preprocessed/ --out predictions/ --layers tsawa sabche --device cuda
+Usage (as an installed console script)
+---------------------------------------
+    tibetan-infer --input preprocessed/ --out predictions/ --all
+    tibetan-infer --input preprocessed/ --out predictions/ --layers tsawa sabche --device cuda
 """
 
 from __future__ import annotations
@@ -34,14 +34,12 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-from common.windows import pack_window_for_inference, sliding_windows, special_token_ids  # noqa: E402
-from common.decode import (  # noqa: E402
+from .decode import (
     merge_char_spans, softmax, span_confidences, spans_from_bio, spans_from_bioe,
     transition_matrix, viterbi, viterbi_bioe,
 )
-from layer_config import LAYERS, LayerConfig  # noqa: E402
+from .layer_config import LAYERS, LayerConfig
+from .windows import pack_window_for_inference, sliding_windows, special_token_ids
 
 CONTENT_MAX = 8190  # max_length 8192 - CLS - SEP, shared by every layer here
 
@@ -64,12 +62,10 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str) -> tuple[lis
 
     Two decode policies, per cfg.stitch_first_window:
       - default (Tsawa, Sabche, Chapter, Quotation): decode each window
-        independently, then union-merge the resulting character spans. This
-        is what each of those models' own published test scores used.
+        independently, then union-merge the resulting character spans.
       - stitched (Yigchung only): a token's logits come only from the first
-        window that covers it (matching how later copies were masked out of
-        the training loss), and the whole document is Viterbi-decoded once
-        as a single sequence. See run_layer_stitched().
+        window that covers it, and the whole document is Viterbi-decoded
+        once as a single sequence. See run_layer_stitched().
     """
     import torch
 
@@ -110,9 +106,8 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str) -> tuple[lis
 
 def run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, cfg: LayerConfig, device) -> list[tuple[int, int, float]]:
     """Yigchung's own inference recipe: each absolute token index gets its
-    logits from the FIRST window (in window order) that covers it -- this
-    matches training, where a token repeated in a later, overlapping window
-    was masked out of the loss (-100). The stitched, whole-document logit
+    logits from the FIRST window that covers it, matching how later copies
+    were masked out of the training loss. The stitched, whole-document logit
     sequence is then Viterbi-decoded once, not per window then merged."""
     n_tokens = len(input_ids)
     n_labels = 4 if cfg.scheme == "bioe" else 3
@@ -159,10 +154,10 @@ def load_layer_model(name: str, device: str):
     except Exception as e:
         # BDRC/Bo-Quotation-Detection and BDRC/Bo-Yigchung-Detection ship a
         # tokenizer_config.json in a newer format (extra_special_tokens as a
-        # list) that this transformers version cannot parse. Their own
-        # READMEs and the Sabche/Tsawa/Chapter cards all state the tokenizer
-        # is an unchanged copy of jhu-clsp/mmBERT-base, so falling back to
-        # that base copy is not a behavior change, only a workaround.
+        # list) that some transformers versions cannot parse. Their own
+        # READMEs state the tokenizer is an unchanged copy of
+        # jhu-clsp/mmBERT-base, so falling back to that base copy is not a
+        # behavior change, only a workaround.
         print(f"  [warn] {cfg.repo}: own tokenizer failed to load ({e}); "
               f"falling back to jhu-clsp/mmBERT-base", file=sys.stderr)
         tok = AutoTokenizer.from_pretrained("jhu-clsp/mmBERT-base", token=token)
@@ -195,8 +190,7 @@ def already_done(book_id: str, out_dir: Path) -> bool:
 def infer_one(book: dict, layer_names: list[str], device: str) -> dict:
     """book is one Stage 1 payload (book_id + text, at least). Returns the
     predictions payload: raw (unrounded) confidence per span, plus n_windows
-    and elapsed_s per layer and any per-layer errors, so Stage 3 can report
-    timing/window counts without re-running inference."""
+    and elapsed_s per layer and any per-layer errors."""
     text, book_id = book["text"], book["book_id"]
     layers: dict[str, list[dict]] = {}
     n_windows: dict[str, int] = {}

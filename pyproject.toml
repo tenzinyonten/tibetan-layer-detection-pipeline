@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tibetan-layer-detection"
+version = "0.1.0"
+description = "Detect Tsawa, Sabche, Chapter, Quotation and Yigchung layers in Tibetan text with per-layer mmBERT models."
+requires-python = ">=3.9"
+dependencies = [
+    "transformers",
+    "torch",
+    "pyyaml",
+    # numpy is a direct import in decode.py/infer.py; listed explicitly so
+    # pip install . can't succeed while actually running the code still
+    # fails with ModuleNotFoundError on an environment where torch alone
+    # didn't happen to pull numpy in.
+    "numpy",
+]
+
+[project.scripts]
+tibetan-preprocess = "tibetan_layer_detection.preprocess:main"
+tibetan-infer = "tibetan_layer_detection.infer:main"
+tibetan-postprocess = "tibetan_layer_detection.postprocess:main"
+tibetan-detect = "tibetan_layer_detection.detect_layers:main"
+
+[tool.setuptools]
+packages = ["tibetan_layer_detection"]

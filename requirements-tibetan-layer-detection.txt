@@ -1,0 +1,10 @@
+# Pinned versions for reproducing the exact environment this package was
+# verified against (pyproject.toml's own dependency list is unpinned,
+# letting pip resolve compatible versions normally).
+#
+# Pinned to what was actually installed and tested against on 2026-09-29
+# (this Mac's /usr/bin/python3, Python 3.9.6).
+transformers==4.57.6
+torch==2.8.0
+pyyaml==6.0.3
+numpy==2.0.2

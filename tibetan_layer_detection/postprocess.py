@@ -4,26 +4,28 @@
 Joins Stage 2's predictions/<book_id>.json (spans + confidence) with Stage
 1's preprocessed/<book_id>.json (source text + source_path -- predictions
 alone carry neither) and writes final JSON, HTML, and/or OpenPecha .opf
-output, plus a batch summary and a run log. No model is loaded here; this
-stage is pure formatting and can be re-run cheaply, including with a
-different --review-threshold, without re-running inference.
+output, plus a batch summary and a run log.
 
 --opf writes predictions as OpenPecha-shaped layer YAML under
 layers/predicted/, a SIBLING of the real layers/v001/, never that folder
-itself -- layers/v001/ holds the gold annotations the source project's whole
-dataset pipeline reads as ground truth, and this tool must not be able to
-silently overwrite that. Only fires for a book whose Stage 1 source_path
-matches the real OpenPecha layout (<id>.opf/<id>.opf/base/v001.txt); anything
-else is skipped with a warning. Schema verified against real files in
-tenzinyonten/layer_detection before writing any code: data/raw_opf/
-P000201.opf's Tsawa.yml/Sabche.yml/Chapter.yml, data/raw_opf/P000172.opf's
-Quotation.yml, data/raw_opf/I058DD999.opf's Yigchung.yml. Deliberately does
-not add a confidence field there, to keep an exact structural match with
-those files; confidence lives in the JSON output only.
+itself -- layers/v001/ holds the gold annotations this project's dataset
+pipeline reads as ground truth, and this tool must not be able to silently
+overwrite that. Only fires for a book whose Stage 1 source_path matches the
+real OpenPecha layout (<id>.opf/<id>.opf/base/v001.txt); anything else is
+skipped with a warning. Schema verified against real files in this repo
+before writing any code: data/raw_opf/P000201.opf's Tsawa.yml/Sabche.yml/
+Chapter.yml, data/raw_opf/P000172.opf's Quotation.yml, data/raw_opf/
+I058DD999.opf's Yigchung.yml. Deliberately does not add a confidence field
+there, to keep an exact structural match with those files; confidence lives
+in the JSON output only.
 
-Usage
------
-    python postprocess.py --input predictions/ --source preprocessed/ \\
+pyyaml is a required dependency of this package (see pyproject.toml), so,
+unlike an earlier standalone version of this tool where PyYAML was made an
+optional lazy import, it is imported normally here at module level.
+
+Usage (as an installed console script)
+---------------------------------------
+    tibetan-postprocess --input predictions/ --source preprocessed/ \\
         --out output/ --json --html --opf --review-threshold 0.7
 """
 
@@ -37,9 +39,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-from layer_config import LAYERS  # noqa: E402
+import yaml
+
+from .layer_config import LAYERS
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +99,7 @@ def opf_root_for(source_path: Path) -> Path | None:
 def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path) -> list[Path]:
     """Write predictions as OpenPecha-shaped layer YAML under
     layers/predicted/ (see module docstring for the safety rationale and the
-    real files this schema was verified against). Imports PyYAML lazily,
-    here only, so `pip install transformers torch` (this repo's declared,
-    tested requirement) stays sufficient for ordinary --json/--html use;
-    PyYAML is only needed when --opf is actually passed."""
-    try:
-        import yaml
-    except ImportError:
-        raise SystemExit("--opf needs PyYAML: pip install pyyaml")
+    real files this schema was verified against)."""
     out_dir = opf_root / "layers" / "predicted"
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
