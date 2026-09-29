@@ -89,3 +89,43 @@ Viterbi-decoded labels) and `review_needed` (`confidence < review_threshold`).
 - GPU recommended for books over 50K characters (CPU works but is slow).
 - Yigchung positive detection not yet validated on real data; its own model
   card says to cite a test F1 of 0.431, well below the other four layers.
+
+## REST API + job queue
+
+A minimal FastAPI + Celery + Redis job queue on top of the package above --
+no auth, no database; Redis (via Celery's own result backend) holds all job
+state.
+
+```bash
+export HF_TOKEN=your_token_here   # needed for the private models
+docker-compose up
+```
+
+Books are read from `./data/` on the host (bind-mounted read-only into the
+worker container at `/data`); `book_path` in a request is resolved relative
+to that folder.
+
+```bash
+curl -X POST http://localhost:8000/process \
+  -H "Content-Type: application/json" \
+  -d '{"book_path": "P000201.opf"}'
+# {"job_id": "..."}
+
+curl http://localhost:8000/status/<job_id>
+# {"job_id": "...", "status": "running", "stage": "infer", "book_id": "P000201"}
+
+curl http://localhost:8000/results/<job_id>
+# the same result shape as tibetan_layer_detection.detect(): book_id,
+# text_length, layers (with confidence/review_needed per span), errors
+```
+
+`layers` in the POST body is optional (defaults to every configured layer):
+`{"book_path": "P000201.opf", "layers": ["tsawa", "sabche"]}`.
+
+`status` is one of `queued` / `running` / `complete` / `failed`; while
+`running`, `stage` is `preprocess` / `infer` / `postprocess`.
+
+To run without Docker: `pip install -r api/requirements.txt`, a local Redis
+(`redis-server`), then `celery -A api.worker worker --loglevel=info` and
+`uvicorn api.main:app --host 0.0.0.0 --port 8000` as two separate processes,
+with `REDIS_URL` and `TIBETAN_DATA_DIR` set (see `api/config.py`).

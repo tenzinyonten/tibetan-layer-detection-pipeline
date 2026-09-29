@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: celery -A api.worker worker --loglevel=info
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      TIBETAN_DATA_DIR: /data
+      # Needed for the private models (Sabche, Chapter, Quotation); export
+      # HF_TOKEN in your shell before `docker-compose up` and it's passed
+      # through automatically.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      - redis

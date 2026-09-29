@@ -33,7 +33,8 @@ _RESULT_EXCLUDE = {"_batch_summary.json"}
 
 
 def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: float = 0.7,
-          write_json: bool = False, write_html: bool = False, write_opf: bool = False):
+          write_json: bool = False, write_html: bool = False, write_opf: bool = False,
+          on_stage=None):
     """Run the full three-stage pipeline in-process and return the result(s).
 
     path: a single text file, or a folder (a mix of .txt files and/or raw
@@ -58,6 +59,14 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         internally regardless -- it's how this function builds its return
         value -- but the per-book .json files are deleted afterward unless
         write_json=True.
+    on_stage: optional callback(stage: str, meta: dict), called before each
+        stage starts -- stage is one of "preprocess", "infer", "postprocess",
+        "complete"; meta holds "book_ids" (the list of book ids discovered by
+        Stage 1, available from the "infer" call onward; empty for
+        "preprocess", since Stage 1 hasn't run yet). Added so a caller (e.g.
+        a Celery task) can report per-stage progress without this function
+        itself depending on Celery or any other job-queue library -- detect()
+        has no idea what, if anything, is calling it.
 
     Returns: one book's result dict ({"book_id", "text_length", "layers",
         and "errors" if there were any}) if `path` is a single file, or a
@@ -65,6 +74,10 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
     """
     layer_names = list(LAYERS) if layers in ("all", ["all"]) else list(layers)
     device = device or ("cuda" if _infer._has_cuda() else "cpu")
+
+    def _notify(stage, book_ids=()):
+        if on_stage is not None:
+            on_stage(stage, {"book_ids": list(book_ids)})
 
     use_temp_dir = out_dir is None and not (write_json or write_html or write_opf)
     tmp = None
@@ -76,10 +89,16 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
             base = Path(out_dir) if out_dir is not None else Path("results")
         pre_dir, pred_dir, stage3_dir = base / "preprocessed", base / "predictions", base / "output"
 
+        _notify("preprocess")
         _preprocess.main(["--input", str(path), "--out", str(pre_dir)])
+        book_ids = [json.loads(fp.read_text(encoding="utf-8"))["book_id"]
+                   for fp in sorted(pre_dir.glob("*.json"))]
+
+        _notify("infer", book_ids)
         _infer.main(["--input", str(pre_dir), "--out", str(pred_dir),
                     "--layers", *layer_names, "--device", device])
 
+        _notify("postprocess", book_ids)
         post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(stage3_dir),
                     "--review-threshold", str(review_threshold), "--json"]
         if write_html:
@@ -94,6 +113,7 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         if not write_json:
             for fp in book_files:
                 fp.unlink()
+        _notify("complete", book_ids)
     finally:
         if tmp is not None:
             tmp.cleanup()
