@@ -34,9 +34,10 @@ from __future__ import annotations
 import argparse
 import html as html_mod
 import json
-import shutil
+import re
 import sys
 import uuid
+from bisect import bisect_left
 from datetime import datetime
 from pathlib import Path
 
@@ -97,13 +98,58 @@ def opf_root_for(source_path: Path) -> Path | None:
     return None
 
 
-def write_plain_opf(book_id: str, source_path: Path, out_dir: Path) -> Path:
+def normalize_tsegs(text: str) -> str:
+    text = re.sub(r'\s+་', '་ ', text)
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
+
+
+def _sub_tracked(pattern: str, new: str, text: str, src: list[int], pick) -> tuple[str, list[int]]:
+    out, out_src, pos = [], [], 0
+    for m in re.finditer(pattern, text):
+        out.append(text[pos:m.start()])
+        out_src.extend(src[pos:m.start()])
+        out.append(new)
+        out_src.extend(pick(m, src))
+        pos = m.end()
+    out.append(text[pos:])
+    out_src.extend(src[pos:])
+    return "".join(out), out_src
+
+
+def normalize_tsegs_tracked(text: str) -> tuple[str, list[int]]:
+    """Same result as normalize_tsegs, plus for every output character the
+    offset of the input character it came from (non-decreasing)."""
+    src = list(range(len(text)))
+    text, src = _sub_tracked(r'\s+་', '་ ', text, src,
+                             lambda m, s: [s[m.start()], s[m.end() - 1]])
+    text, src = _sub_tracked(r' +', ' ', text, src, lambda m, s: [s[m.start()]])
+    lead = len(text) - len(text.lstrip())
+    text = text.strip()
+    return text, src[lead:lead + len(text)]
+
+
+def remap_layers(layers: dict[str, list[dict]], src: list[int]) -> dict[str, list[dict]]:
+    """Move span offsets from the original text to the normalized one. A span
+    that only covered removed whitespace disappears."""
+    out = {}
+    for name, spans in layers.items():
+        kept = []
+        for s in spans:
+            start, end = bisect_left(src, s["start"]), bisect_left(src, s["end"])
+            if end > start:
+                kept.append({**s, "start": start, "end": end})
+        out[name] = kept
+    return out
+
+
+def write_plain_opf(book_id: str, text: str, out_dir: Path) -> Path:
     """For a plain .txt input: create <out>/<id>.opf/<id>.opf/ with
-    base/v001.txt (a copy of the input) and return that inner root, ready for
+    base/v001.txt (the text given) and return that inner root, ready for
     write_opf_layers (which fills layers/predicted/)."""
     root = out_dir / f"{book_id}.opf" / f"{book_id}.opf"
     (root / "base").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_path, root / "base" / "v001.txt")
+    (root / "base" / "v001.txt").write_text(text, encoding="utf-8")
     return root
 
 
@@ -255,14 +301,17 @@ def main(argv=None) -> int:
             source_path = Path(preprocessed["source_path"])
             root = opf_root_for(source_path)
             plain = root is None
+            opf_layers = layers
             if plain:
                 if source_path.is_file():
-                    root = write_plain_opf(book_id, source_path, args.out)
+                    norm_text, src = normalize_tsegs_tracked(text)
+                    root = write_plain_opf(book_id, norm_text, args.out)
+                    opf_layers = remap_layers(layers, src)
                 else:
                     print(f"  [warn] {book_id}: {source_path} not found; "
                           f"skipping --opf output for this book", file=sys.stderr)
             if root is not None:
-                for p in write_opf_layers(layers, root, write_empty=plain):
+                for p in write_opf_layers(opf_layers, root, write_empty=plain):
                     print(f"[{i}/{len(files)}] wrote {p}")
 
         review_needed = {n: sum(1 for s in spans if s["confidence"] < args.review_threshold)
