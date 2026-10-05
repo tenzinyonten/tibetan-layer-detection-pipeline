@@ -6,13 +6,13 @@ Joins Stage 2's predictions/<book_id>.json (spans + confidence) with Stage
 alone carry neither) and writes final JSON, HTML, and/or OpenPecha .opf
 output, plus a batch summary and a run log.
 
---opf writes predictions as OpenPecha-shaped layer YAML under layers/v001/,
-only for layers with at least one span. For a book whose Stage 1
-source_path matches the real OpenPecha layout (<id>.opf/<id>.opf/base/
-v001.txt), that is the book's OWN layers/v001/, which holds the gold
-annotations, so existing files of the same name get overwritten. Any other
-input (a plain .txt) gets a fresh minimal structure under --out:
-<id>.opf/<id>.opf/base/v001.txt plus layers/v001/. Schema verified against real files in this repo
+--opf writes predictions as OpenPecha-shaped layer YAML, only for layers with
+at least one span. A plain .txt input gets a fresh minimal structure under
+--out: <id>.opf/<id>.opf/base/v001.txt plus layers/v001/. A real OpenPecha
+book (Stage 1 source_path matches <id>.opf/<id>.opf/base/v001.txt) whose
+layers/v001/ already exists holds gold annotations, so its predictions go to
+the sibling layers/predicted/ instead and layers/v001/ is never touched.
+Schema verified against real files in this repo
 before writing any code: data/raw_opf/P000201.opf's Tsawa.yml/Sabche.yml/
 Chapter.yml, data/raw_opf/P000172.opf's Quotation.yml, data/raw_opf/
 I058DD999.opf's Yigchung.yml. Deliberately does not add a confidence field
@@ -146,18 +146,20 @@ def remap_layers(layers: dict[str, list[dict]], src: list[int]) -> dict[str, lis
 def write_plain_opf(book_id: str, text: str, out_dir: Path) -> Path:
     """For a plain .txt input: create <out>/<id>.opf/<id>.opf/ with
     base/v001.txt (the text given) and return that inner root, ready for
-    write_opf_layers (which fills layers/v001/)."""
+    write_opf_layers (which fills layers/v001/ via write_opf_layers)."""
     root = out_dir / f"{book_id}.opf" / f"{book_id}.opf"
     (root / "base").mkdir(parents=True, exist_ok=True)
     (root / "base" / "v001.txt").write_text(text, encoding="utf-8")
     return root
 
 
-def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path) -> list[Path]:
+def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path,
+                     subdir: str = "v001") -> list[Path]:
     """Write predictions as OpenPecha-shaped layer YAML under
-    layers/v001/, skipping layers with no spans (see module docstring for the
-    overwrite caveat and the real files this schema was verified against)."""
-    out_dir = opf_root / "layers" / "v001"
+    layers/<subdir>/, skipping layers with no spans (see module docstring for
+    which subdir is used when, and the real files this schema was verified
+    against)."""
+    out_dir = opf_root / "layers" / subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for name, spans in layers.items():
@@ -264,7 +266,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--html", action="store_true")
     ap.add_argument("--opf", action="store_true",
                     help="also write predictions as OpenPecha layer YAML under "
-                         "layers/v001/ (only layers with spans); only for books "
+                         "layers/v001/ for plain .txt input, or layers/predicted/ for a real "
+                         "OpenPecha book whose layers/v001/ already exists (only layers with spans); only for books "
                          "whose Stage 1 source_path matches <id>.opf/<id>.opf/base/v001.txt")
     ap.add_argument("--review-threshold", type=float, default=0.7,
                     help="a span with confidence below this is flagged review_needed")
@@ -310,7 +313,8 @@ def main(argv=None) -> int:
                     print(f"  [warn] {book_id}: {source_path} not found; "
                           f"skipping --opf output for this book", file=sys.stderr)
             if root is not None:
-                for p in write_opf_layers(opf_layers, root):
+                subdir = "predicted" if not plain and (root / "layers" / "v001").is_dir() else "v001"
+                for p in write_opf_layers(opf_layers, root, subdir):
                     print(f"[{i}/{len(files)}] wrote {p}")
 
         review_needed = {n: sum(1 for s in spans if s["confidence"] < args.review_threshold)
