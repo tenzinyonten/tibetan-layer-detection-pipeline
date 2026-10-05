@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import html as html_mod
 import json
+import shutil
 import sys
 import uuid
 from datetime import datetime
@@ -96,7 +97,18 @@ def opf_root_for(source_path: Path) -> Path | None:
     return None
 
 
-def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path) -> list[Path]:
+def write_plain_opf(book_id: str, source_path: Path, out_dir: Path) -> Path:
+    """For a plain .txt input: create <out>/<id>.opf/<id>.opf/ with
+    base/v001.txt (a copy of the input) and return that inner root, ready for
+    write_opf_layers (which fills layers/predicted/)."""
+    root = out_dir / f"{book_id}.opf" / f"{book_id}.opf"
+    (root / "base").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, root / "base" / "v001.txt")
+    return root
+
+
+def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path,
+                     write_empty: bool = False) -> list[Path]:
     """Write predictions as OpenPecha-shaped layer YAML under
     layers/predicted/ (see module docstring for the safety rationale and the
     real files this schema was verified against)."""
@@ -104,7 +116,7 @@ def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path) -> list[Path
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for name, spans in layers.items():
-        if not spans:
+        if not spans and not write_empty:
             continue
         layer_name = name.capitalize()
         data = {
@@ -240,13 +252,17 @@ def main(argv=None) -> int:
             p = write_html(book_id, text, layers, errors, args.out)
             print(f"[{i}/{len(files)}] wrote {p}")
         if args.opf:
-            root = opf_root_for(Path(preprocessed["source_path"]))
-            if root is None:
-                print(f"  [warn] {book_id}: {preprocessed['source_path']} doesn't match "
-                      f"<id>.opf/<id>.opf/base/v001.txt; skipping --opf output for this book",
-                      file=sys.stderr)
-            else:
-                for p in write_opf_layers(layers, root):
+            source_path = Path(preprocessed["source_path"])
+            root = opf_root_for(source_path)
+            plain = root is None
+            if plain:
+                if source_path.is_file():
+                    root = write_plain_opf(book_id, source_path, args.out)
+                else:
+                    print(f"  [warn] {book_id}: {source_path} not found; "
+                          f"skipping --opf output for this book", file=sys.stderr)
+            if root is not None:
+                for p in write_opf_layers(layers, root, write_empty=plain):
                     print(f"[{i}/{len(files)}] wrote {p}")
 
         review_needed = {n: sum(1 for s in spans if s["confidence"] < args.review_threshold)
