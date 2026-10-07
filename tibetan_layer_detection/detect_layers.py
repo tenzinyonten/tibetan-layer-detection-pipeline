@@ -47,9 +47,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--opf", action="store_true",
                     help="also write predictions as OpenPecha layer YAML under "
                          "layers/predicted/ (never layers/v001/)")
-    ap.add_argument("--review-threshold", type=float, default=0.7)
+    ap.add_argument("--review-threshold", type=float, default=None,
+                    help="flag a span review_needed below this confidence, for every layer. "
+                         "Default: each layer's own threshold (see layer_config.py)")
     ap.add_argument("--out", type=Path, default=Path("results"))
     ap.add_argument("--device", default=None, help="default: cuda if available, else cpu")
+    ap.add_argument("--stride", type=int, default=None,
+                    help="override every selected layer's window stride; default keeps "
+                         "each layer's own configured stride")
+    ap.add_argument("--dual-window", action="store_true",
+                    help="also run each layer at half window/stride size and flag spans "
+                         "the two sizes disagree on; roughly doubles inference time")
     return ap.parse_args(argv)
 
 
@@ -70,11 +78,16 @@ def main(argv=None) -> int:
     infer_argv += ["--all"] if args.all else ["--layers", *args.layers]
     if args.device:
         infer_argv += ["--device", args.device]
+    if args.stride is not None:
+        infer_argv += ["--stride", str(args.stride)]
+    if args.dual_window:
+        infer_argv += ["--dual-window"]
     infer.main(infer_argv)
 
     print(f"\n{'='*60}\nSTAGE 3: postprocess\n{'='*60}")
-    post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(out_dir),
-                "--review-threshold", str(args.review_threshold)]
+    post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(out_dir)]
+    if args.review_threshold is not None:
+        post_argv += ["--review-threshold", str(args.review_threshold)]
     if args.json:
         post_argv.append("--json")
     if args.html:

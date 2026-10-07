@@ -35,7 +35,8 @@ from pathlib import Path
 import numpy as np
 
 from .decode import (
-    merge_char_spans, softmax, span_confidences, spans_from_bio, spans_from_bioe,
+    MIN_SPAN_CHARS, apply_linguistic_rules, merge_dual_window, merge_spans_with_votes,
+    overlap_regions, softmax, span_confidences, spans_from_bio, spans_from_bioe,
     transition_matrix, viterbi, viterbi_bioe,
 )
 from .layer_config import LAYERS, LayerConfig
@@ -44,12 +45,17 @@ from .windows import pack_window_for_inference, sliding_windows, special_token_i
 CONTENT_MAX = 8190  # max_length 8192 - CLS - SEP, shared by every layer here
 
 
-def _window_logits(text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device):
-    """Run one window through the model. Returns logits for its content tokens only."""
+def _window_logits(text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device,
+                   max_length=8192):
+    """Run one window through the model. Returns logits for its content tokens only.
+
+    max_length: CLS + content + SEP (+ padding); defaults to the shared 8192
+    every layer trained at. --dual-window's half-size pass calls this with a
+    smaller max_length instead."""
     import torch
 
     ids, mask, content_off = pack_window_for_inference(
-        text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, max_length=8192)
+        text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, max_length=max_length)
     out = model(input_ids=torch.tensor([ids], device=device),
                attention_mask=torch.tensor([mask], device=device)).logits[0]
     logits = out.float().cpu().numpy()
@@ -57,8 +63,26 @@ def _window_logits(text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_
     return logits[1:1 + n_content], content_off
 
 
-def run_layer(text: str, tok, model, cfg: LayerConfig, device: str) -> tuple[list[tuple[int, int, float]], int]:
-    """Returns (character spans as (start, end, confidence) triples, number of windows run).
+def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
+             stride: int | None = None, content_max: int = CONTENT_MAX,
+             ) -> tuple[list[tuple[int, int, float, int]], int]:
+    """Returns (character spans as (start, end, confidence, window_votes)
+    4-tuples, number of windows run).
+
+    stride: overrides cfg.stride for this call (e.g. from --stride). None
+        (the default) keeps each layer's own configured stride -- tsawa/
+        sabche/chapter at 5120, quotation at 3613, yigchung at 4914 -- so
+        omitting --stride is unchanged from before this option existed.
+    content_max: window content size in tokens (CLS/SEP are added on top).
+        Defaults to the shared CONTENT_MAX every layer trained at; passed
+        smaller by run_layer_dual's half-size pass (--dual-window).
+
+    window_votes is how many distinct windows' predictions were merged into
+    that span; confidence is adjusted by that count (see
+    decode.merge_spans_with_votes). Always 1 for Yigchung (stitch_first_window
+    -- see run_layer_stitched), since it decodes the whole document once from
+    a stitched logit sequence rather than merging per-window predictions, so
+    "which window voted for this span" does not apply there.
 
     Two decode policies, per cfg.stitch_first_window:
       - default (Tsawa, Sabche, Chapter, Quotation): decode each window
@@ -69,23 +93,29 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str) -> tuple[lis
     """
     import torch
 
+    eff_stride = cfg.stride if stride is None else stride
+    max_length = content_max + 2  # + CLS + SEP
     enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
     input_ids = enc["input_ids"]
     offsets = [tuple(o) for o in enc["offset_mapping"]]
     cls_id, sep_id, pad_id = special_token_ids(tok)
-    wins = sliding_windows(len(input_ids), CONTENT_MAX, cfg.stride)
+    wins = sliding_windows(len(input_ids), content_max, eff_stride)
     model.eval()
 
     if cfg.stitch_first_window:
         with torch.no_grad():
-            spans = run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, cfg, device)
+            spans = run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, cfg,
+                                       device, max_length=max_length)
         return spans, len(wins)
 
-    all_spans: list[tuple[int, int, float]] = []
+    all_spans: list[tuple[int, int, float, int]] = []
+    window_char_ranges: list[tuple[int, int]] = []
     with torch.no_grad():
-        for w_start, w_end in wins:
+        for widx, (w_start, w_end) in enumerate(wins):
             content_logits, content_off = _window_logits(
-                input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device)
+                input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device,
+                max_length=max_length)
+            window_char_ranges.append((content_off[0][0], content_off[-1][1]))
             n_content = len(content_off)
             if cfg.scheme == "bio":
                 seq = viterbi(content_logits, cfg.break_penalty)
@@ -100,11 +130,13 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str) -> tuple[lis
                     continue
                 cs, ce = content_off[a][0], content_off[b][1]
                 if ce > cs:
-                    all_spans.append((cs, ce, conf))
-    return merge_char_spans(all_spans), len(wins)
+                    all_spans.append((cs, ce, conf, widx))
+    regions = overlap_regions(window_char_ranges)
+    return merge_spans_with_votes(all_spans, regions), len(wins)
 
 
-def run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, cfg: LayerConfig, device) -> list[tuple[int, int, float]]:
+def run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, cfg: LayerConfig, device,
+                       max_length=8192) -> list[tuple[int, int, float, int]]:
     """Yigchung's own inference recipe: each absolute token index gets its
     logits from the FIRST window that covers it, matching how later copies
     were masked out of the training loss. The stitched, whole-document logit
@@ -115,7 +147,8 @@ def run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, 
     owned = np.zeros(n_tokens, dtype=bool)
     for w_start, w_end in wins:
         content_logits, content_off = _window_logits(
-            input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device)
+            input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_id, model, device,
+            max_length=max_length)
         for i, abs_idx in enumerate(range(w_start, w_end)):
             if not owned[abs_idx]:
                 stitched[abs_idx] = content_logits[i]
@@ -128,8 +161,38 @@ def run_layer_stitched(input_ids, offsets, wins, cls_id, sep_id, pad_id, model, 
     for (a, b), conf in zip(tok_spans, confs):
         cs, ce = offsets[a][0], offsets[b][1]
         if ce > cs:
-            out.append((cs, ce, conf))
+            out.append((cs, ce, conf, 1))  # window_votes: not meaningful here, see run_layer
     return out
+
+
+def rule_flags(cfg: LayerConfig) -> dict:
+    """The layer's cleanup switches as apply_linguistic_rules keyword arguments."""
+    return {"extend_to_tsheg": cfg.extend_to_tsheg, "merge_gaps": cfg.merge_small_gaps,
+            "repair": cfg.repair_fragments,
+            "extend_fragments": cfg.extend_lone_fragments}
+
+
+def run_layer_dual(text: str, tok, model, cfg: LayerConfig, device: str,
+                   stride: int | None = None,
+                   ) -> tuple[list[tuple[int, int, float, int, str]], int, int]:
+    """--dual-window: runs the layer twice, once at the normal (possibly
+    --stride-overridden) window size and once at half window size / half
+    stride, each independently cleaned up by apply_linguistic_rules, then
+    reconciled by decode.merge_dual_window. Returns (spans as 5-tuples with a
+    trailing dual_window_agreement string, total windows run across both
+    passes, total short spans removed across both passes)."""
+    full_stride = cfg.stride if stride is None else stride
+    full_spans, n_full = run_layer(text, tok, model, cfg, device, stride=full_stride,
+                                   content_max=CONTENT_MAX)
+    full_spans, n_removed_full = apply_linguistic_rules(full_spans, text, **rule_flags(cfg))
+
+    half_stride = max(1, full_stride // 2)
+    half_spans, n_half = run_layer(text, tok, model, cfg, device, stride=half_stride,
+                                   content_max=CONTENT_MAX // 2)
+    half_spans, n_removed_half = apply_linguistic_rules(half_spans, text, **rule_flags(cfg))
+
+    merged = merge_dual_window(full_spans, half_spans)
+    return merged, n_full + n_half, n_removed_full + n_removed_half
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +250,20 @@ def already_done(book_id: str, out_dir: Path) -> bool:
     return (out_dir / f"{book_id}.json").exists()
 
 
-def infer_one(book: dict, layer_names: list[str], device: str) -> dict:
+def infer_one(book: dict, layer_names: list[str], device: str,
+             stride: int | None = None, dual_window: bool = False) -> dict:
     """book is one Stage 1 payload (book_id + text, at least). Returns the
-    predictions payload: raw (unrounded) confidence per span, plus n_windows
-    and elapsed_s per layer and any per-layer errors."""
+    predictions payload: raw (unrounded) confidence per span, plus n_windows,
+    elapsed_s and short_spans_removed per layer and any per-layer errors.
+
+    stride: see run_layer -- None keeps each layer's own configured stride.
+    dual_window: see run_layer_dual -- doubles inference time per layer when
+        True; each span gets an extra "dual_window_agreement" field."""
     text, book_id = book["text"], book["book_id"]
     layers: dict[str, list[dict]] = {}
     n_windows: dict[str, int] = {}
     elapsed_s: dict[str, float] = {}
+    short_spans_removed: dict[str, int] = {}
     errors: dict[str, str] = {}
     for name in layer_names:
         t0 = time.time()
@@ -205,15 +274,28 @@ def infer_one(book: dict, layer_names: list[str], device: str) -> dict:
             print(f"  [warn] {book_id}: layer '{name}' skipped: {e}", file=sys.stderr)
             continue
         try:
-            spans, n_win = run_layer(text, tok, model, LAYERS[name], device)
-            layers[name] = [{"start": s, "end": e, "confidence": c} for s, e, c in spans]
+            if dual_window:
+                spans5, n_win, n_removed = run_layer_dual(text, tok, model, LAYERS[name], device,
+                                                           stride=stride)
+                layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v,
+                                "dual_window_agreement": agreement}
+                               for s, e, c, v, agreement in spans5]
+            else:
+                spans, n_win = run_layer(text, tok, model, LAYERS[name], device, stride=stride)
+                spans, n_removed = apply_linguistic_rules(spans, text, **rule_flags(LAYERS[name]))
+                layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v}
+                               for s, e, c, v in spans]
+            if n_removed:
+                print(f"  [note] {book_id}: layer '{name}': removed {n_removed} span(s) "
+                      f"under {MIN_SPAN_CHARS} chars as noise", file=sys.stderr)
+            short_spans_removed[name] = n_removed
             n_windows[name] = n_win
         except Exception as e:
             errors[name] = f"inference failed: {e}"
             print(f"  [warn] {book_id}: layer '{name}' failed: {e}", file=sys.stderr)
         elapsed_s[name] = round(time.time() - t0, 2)
     return {"book_id": book_id, "layers": layers, "n_windows": n_windows,
-            "elapsed_s": elapsed_s, "errors": errors}
+            "elapsed_s": elapsed_s, "short_spans_removed": short_spans_removed, "errors": errors}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -223,6 +305,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--layers", nargs="+", choices=list(LAYERS), default=None)
     ap.add_argument("--all", action="store_true", help="run every layer with a model configured")
     ap.add_argument("--device", default="cuda" if _has_cuda() else "cpu")
+    ap.add_argument("--stride", type=int, default=None,
+                    help="override every selected layer's window stride (smaller = more "
+                         "overlap between windows). Default: each layer keeps its own "
+                         "configured stride (tsawa/sabche/chapter 5120, quotation 3613, "
+                         "yigchung 4914) -- unchanged from before this option existed.")
+    ap.add_argument("--dual-window", action="store_true",
+                    help="also run each layer at half window/stride size and keep only "
+                         "spans both runs agree on at high confidence; spans only one run "
+                         "found are flagged dual_window_agreement for review. Roughly "
+                         "doubles inference time per layer.")
     return ap.parse_args(argv)
 
 
@@ -255,7 +347,8 @@ def main(argv=None) -> int:
             continue
 
         t0 = time.time()
-        result = infer_one(book, layer_names, args.device)
+        result = infer_one(book, layer_names, args.device, stride=args.stride,
+                          dual_window=args.dual_window)
         elapsed = time.time() - t0
         out_path = args.out / f"{book_id}.json"
         out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

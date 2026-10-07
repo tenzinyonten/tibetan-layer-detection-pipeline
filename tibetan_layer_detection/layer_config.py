@@ -34,6 +34,16 @@ class LayerConfig:
     source: str  # where break_penalty/stride came from, for the --help text and logs
     stitch_first_window: bool = False  # see infer.run_layer_stitched(); only Yigchung as of 2026-09-28
     caveat: str = ""  # printed once when the layer is loaded, for a known-weak model
+    # Post-Viterbi cleanup switches, read by decode.apply_linguistic_rules (see its docstring).
+    # Defaults keep the original behavior for every layer; Sabche overrides them, because
+    # on the Sabche test set (29 books) extend_to_tsheg alone cost 12 true positives (F1 0.9619
+    # -> 0.9590) and merge_small_gaps fused neighbouring headings (F1 -> 0.822).
+    extend_to_tsheg: bool = True     # extend a span ending mid-syllable to the next tsheg
+    merge_small_gaps: bool = True    # merge spans separated only by a short punctuation gap
+    repair_fragments: bool = False   # drop short spans nested in a longer one (a duplicate)
+    extend_lone_fragments: bool = False  # with repair_fragments: also extend a short span with no cover
+    # to the next shad/newline. Sabche test: recovers 1 heading but turns ~10 other fragments into
+    # full-length false positives (F1 0.9642 -> 0.9630), so it is off.
 
 
 LAYERS: dict[str, LayerConfig] = {
@@ -46,6 +56,7 @@ LAYERS: dict[str, LayerConfig] = {
         repo="BDRC/Bo-Sabche-detection", scheme="bio",  # NB: repo has lowercase 'detection'
         break_penalty=4.0, stride=5120, color="#4d9df5",  # blue
         source="BDRC/Bo-Sabche-detection training/test_metrics.json (decoding.break_penalty)",
+        extend_to_tsheg=False, merge_small_gaps=False, repair_fragments=True,
     ),
     "chapter": LayerConfig(
         repo="BDRC/Bo-Chapter-Detection", scheme="bio",
