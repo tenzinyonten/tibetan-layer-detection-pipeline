@@ -45,6 +45,20 @@ import yaml
 
 from .layer_config import LAYERS
 
+# Spans under this many characters are dropped from every output (JSON, HTML,
+# .opf) for all layers. On the Sabche test set the 19 predicted spans of 1-4
+# characters matched no gold span, and removing them moved F1 from 0.962 to
+# 0.964. Same threshold as decode.MIN_SPAN_CHARS (inference-side filter);
+# applied again here so predictions made before that filter existed, or by
+# another tool, are cleaned too. Spans are end-exclusive, so length = end - start.
+MIN_SPAN_CHARS = 5
+
+
+def drop_short_spans(layers: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    """Returns (layers without spans under MIN_SPAN_CHARS, n_dropped per layer)."""
+    kept = {n: [s for s in spans if s["end"] - s["start"] >= MIN_SPAN_CHARS] for n, spans in layers.items()}
+    return kept, {n: len(layers[n]) - len(kept[n]) for n in layers}
+
 
 # ---------------------------------------------------------------------------
 # joining Stage 1 + Stage 2
@@ -291,6 +305,10 @@ def main(argv=None) -> int:
             continue
 
         layers, errors = predictions["layers"], predictions.get("errors", {})
+        layers, dropped_short = drop_short_spans(layers)
+        if any(dropped_short.values()):
+            print(f"  [note] {book_id}: dropped spans under {MIN_SPAN_CHARS} chars: "
+                  f"{ {n: c for n, c in dropped_short.items() if c} }", file=sys.stderr)
         text, text_length = preprocessed["text"], preprocessed["char_count"]
 
         if args.json:
@@ -327,6 +345,7 @@ def main(argv=None) -> int:
             "n_windows": predictions.get("n_windows", {}), "elapsed_s": predictions.get("elapsed_s", {}),
             "spans": {n: len(spans) for n, spans in layers.items()},
             "review_needed": review_needed,
+            "short_spans_dropped_at_render": dropped_short,
             "errors": combined_errors,
         })
 
