@@ -43,6 +43,7 @@ from pathlib import Path
 
 import yaml
 
+from .decode import has_tibetan
 from .layer_config import LAYERS
 
 # Spans under this many characters are dropped from every output (JSON, HTML,
@@ -57,6 +58,13 @@ MIN_SPAN_CHARS = 5
 def drop_short_spans(layers: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], dict[str, int]]:
     """Returns (layers without spans under MIN_SPAN_CHARS, n_dropped per layer)."""
     kept = {n: [s for s in spans if s["end"] - s["start"] >= MIN_SPAN_CHARS] for n, spans in layers.items()}
+    return kept, {n: len(layers[n]) - len(kept[n]) for n in layers}
+
+
+def drop_non_tibetan_spans(layers: dict[str, list[dict]], text: str) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    """Returns (layers without spans that contain no Tibetan character, n_dropped per layer).
+    Catches scraping artifacts (e.g. English navigation text) in every layer."""
+    kept = {n: [s for s in spans if has_tibetan(text[s["start"]:s["end"]])] for n, spans in layers.items()}
     return kept, {n: len(layers[n]) - len(kept[n]) for n in layers}
 
 
@@ -310,6 +318,10 @@ def main(argv=None) -> int:
             print(f"  [note] {book_id}: dropped spans under {MIN_SPAN_CHARS} chars: "
                   f"{ {n: c for n, c in dropped_short.items() if c} }", file=sys.stderr)
         text, text_length = preprocessed["text"], preprocessed["char_count"]
+        layers, dropped_non_tibetan = drop_non_tibetan_spans(layers, text)
+        if any(dropped_non_tibetan.values()):
+            print(f"  [note] {book_id}: dropped spans with no Tibetan text: "
+                  f"{ {n: c for n, c in dropped_non_tibetan.items() if c} }", file=sys.stderr)
 
         if args.json:
             p = write_json(book_id, text_length, layers, errors, args.out, args.review_threshold)
@@ -346,6 +358,7 @@ def main(argv=None) -> int:
             "spans": {n: len(spans) for n, spans in layers.items()},
             "review_needed": review_needed,
             "short_spans_dropped_at_render": dropped_short,
+            "non_tibetan_spans_dropped_at_render": dropped_non_tibetan,
             "errors": combined_errors,
         })
 

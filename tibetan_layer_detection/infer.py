@@ -287,7 +287,7 @@ def infer_one(book: dict, layer_names: list[str], device: str,
                                for s, e, c, v in spans]
             if n_removed:
                 print(f"  [note] {book_id}: layer '{name}': removed {n_removed} span(s) "
-                      f"under {MIN_SPAN_CHARS} chars as noise", file=sys.stderr)
+                      f"(under {MIN_SPAN_CHARS} chars, duplicate fragments, or no Tibetan text)", file=sys.stderr)
             short_spans_removed[name] = n_removed
             n_windows[name] = n_win
         except Exception as e:
