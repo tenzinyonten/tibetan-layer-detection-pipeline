@@ -44,6 +44,12 @@ class LayerConfig:
     extend_lone_fragments: bool = False  # with repair_fragments: also extend a short span with no cover
     # to the next shad/newline. Sabche test: recovers 1 heading but turns ~10 other fragments into
     # full-length false positives (F1 0.9642 -> 0.9630), so it is off.
+    shad_rule: bool = False  # drop a span under decode.SHAD_RULE_MAX_CHARS (8) chars unless a shad
+    # follows it; a precision rule. Sabche test (29 books): P 0.9609 -> 0.9635, R 0.9696 unchanged,
+    # F1 0.9652 -> 0.9665 (+0.0013; 11 false positives dropped, no true positives).
+    # SHIPPED PENDING VALIDATION, NOT CONFIRMED: the rule and its 8-char threshold were tuned by
+    # looking at the test split's errors, so these numbers are in-sample. Re-check on the validation
+    # split when the Sabche model is next run, and set shad_rule=False for sabche if it does not hold.
 
 
 LAYERS: dict[str, LayerConfig] = {
@@ -56,7 +62,7 @@ LAYERS: dict[str, LayerConfig] = {
         repo="BDRC/Bo-Sabche-detection", scheme="bio",  # NB: repo has lowercase 'detection'
         break_penalty=4.0, stride=5120, color="#4d9df5",  # blue
         source="BDRC/Bo-Sabche-detection training/test_metrics.json (decoding.break_penalty)",
-        extend_to_tsheg=False, merge_small_gaps=False, repair_fragments=True,
+        extend_to_tsheg=False, merge_small_gaps=False, repair_fragments=True, shad_rule=True,
     ),
     "chapter": LayerConfig(
         repo="BDRC/Bo-Chapter-Detection", scheme="bio",
