@@ -47,6 +47,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--opf", action="store_true",
                     help="also write predictions as OpenPecha layer YAML under "
                          "layers/predicted/ (never layers/v001/)")
+    ap.add_argument("--title-author-system", choices=["model", "skill", "both"], default="model",
+                    help="title/author layers: the trained model (default), the PAID LLM skill, or both")
+    ap.add_argument("--title-model", default=None, help="Hugging Face repo for the title model")
+    ap.add_argument("--author-model", default=None, help="Hugging Face repo for the author model")
+    ap.add_argument("--title-author-skill-model", default=None, help="LLM the skill calls (skill/both)")
+    ap.add_argument("--title-author-skill-dir", default=None, help="folder holding title_author_skill.py")
+    ap.add_argument("--title-author-opf", action="store_true", help="NOT IMPLEMENTED (an error if on)")
+    ap.add_argument("--title-author-review-threshold", type=float, default=None,
+                    help="flag a title/author span review_needed below this confidence")
     ap.add_argument("--review-threshold", type=float, default=None,
                     help="flag a span review_needed below this confidence, for every layer. "
                          "Default: each layer's own threshold (see layer_config.py)")
@@ -82,12 +91,22 @@ def main(argv=None) -> int:
         infer_argv += ["--stride", str(args.stride)]
     if args.dual_window:
         infer_argv += ["--dual-window"]
+    infer_argv += ["--title-author-system", args.title_author_system]
+    for flag, val in (("--title-model", args.title_model), ("--author-model", args.author_model),
+                      ("--title-author-skill-model", args.title_author_skill_model),
+                      ("--title-author-skill-dir", args.title_author_skill_dir)):
+        if val:
+            infer_argv += [flag, str(val)]
     infer.main(infer_argv)
 
     print(f"\n{'='*60}\nSTAGE 3: postprocess\n{'='*60}")
     post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(out_dir)]
     if args.review_threshold is not None:
         post_argv += ["--review-threshold", str(args.review_threshold)]
+    if args.title_author_review_threshold is not None:
+        post_argv += ["--title-author-review-threshold", str(args.title_author_review_threshold)]
+    if args.title_author_opf:
+        post_argv.append("--title-author-opf")
     if args.json:
         post_argv.append("--json")
     if args.html:
