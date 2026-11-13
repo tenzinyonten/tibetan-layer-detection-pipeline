@@ -298,6 +298,15 @@ def infer_one(book: dict, layer_names: list[str], device: str,
             "elapsed_s": elapsed_s, "short_spans_removed": short_spans_removed, "errors": errors}
 
 
+def layers_for_run(requested: list[str], *, skip_quotation: bool = False) -> list[str]:
+    """Ensure the quotation *model* runs whenever tsawa does, so postprocess
+    can drop tsawa spans that sit inside predicted quotations."""
+    names = list(requested)
+    if "tsawa" in names and "quotation" not in names and not skip_quotation:
+        names.append("quotation")
+    return names
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--input", type=Path, required=True, help="folder of Stage 1 preprocessed JSONs")
@@ -310,6 +319,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "overlap between windows). Default: each layer keeps its own "
                          "configured stride (tsawa/sabche/chapter 5120, quotation 3613, "
                          "yigchung 4914) -- unchanged from before this option existed.")
+    ap.add_argument("--skip-quotation", action="store_true",
+                    help="do not auto-run the quotation model when tsawa is selected. "
+                         "Default: tsawa also runs Bo-Quotation-Detection so Stage 3 can "
+                         "drop quoted tsawa (no gold layers needed).")
     ap.add_argument("--dual-window", action="store_true",
                     help="also run each layer at half window/stride size and keep only "
                          "spans both runs agree on at high confidence; spans only one run "
@@ -330,7 +343,10 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if not args.layers and not args.all:
         raise SystemExit("pass --layers <name...> or --all")
-    layer_names = list(LAYERS) if args.all else args.layers
+    layer_names = layers_for_run(
+        list(LAYERS) if args.all else list(args.layers),
+        skip_quotation=args.skip_quotation,
+    )
 
     files = sorted(args.input.glob("*.json"))
     if not files:
