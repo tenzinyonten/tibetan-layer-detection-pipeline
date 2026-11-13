@@ -44,7 +44,7 @@ from pathlib import Path
 import yaml
 
 from .decode import has_tibetan
-from .layer_config import LAYERS
+from .layer_config import LAYERS, base_layer, is_title_author
 
 # Spans under this many characters are dropped from every output (JSON, HTML,
 # .opf) for all layers. On the Sabche test set the 19 predicted spans of 1-4
@@ -56,8 +56,11 @@ MIN_SPAN_CHARS = 5
 
 
 def drop_short_spans(layers: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], dict[str, int]]:
-    """Returns (layers without spans under MIN_SPAN_CHARS, n_dropped per layer)."""
-    kept = {n: [s for s in spans if s["end"] - s["start"] >= MIN_SPAN_CHARS] for n, spans in layers.items()}
+    """Returns (layers without spans under MIN_SPAN_CHARS, n_dropped per layer).
+    Title and author are exempt: they are one span per work and a short
+    author name is real, not a fragment."""
+    kept = {n: spans if is_title_author(n) else [s for s in spans if s["end"] - s["start"] >= MIN_SPAN_CHARS]
+            for n, spans in layers.items()}
     return kept, {n: len(layers[n]) - len(kept[n]) for n in layers}
 
 
@@ -147,19 +150,49 @@ def load_pair(book_id: str, predictions_dir: Path, preprocessed_dir: Path) -> tu
 
 
 # ---------------------------------------------------------------------------
+# review flags
+# ---------------------------------------------------------------------------
+
+def threshold_for(layer_name: str, review_threshold: float, ta_threshold: float | None = None) -> float:
+    """review_threshold is the --review-threshold value, one number for every
+    layer. For the title/author layers, ta_threshold (--title-author-review-threshold)
+    wins over it."""
+    if ta_threshold is not None and is_title_author(layer_name):
+        return ta_threshold
+    return review_threshold
+
+
+def needs_review(s: dict, name: str, review_threshold: float, ta_threshold: float | None = None) -> bool:
+    """A span is flagged when its confidence is below the threshold. A skill span
+    has no confidence: the skill's own checks (review_needed from Stage 2) decide."""
+    if s.get("confidence") is None:
+        return bool(s.get("review_needed"))
+    return s["confidence"] < threshold_for(name, review_threshold, ta_threshold)
+
+
+def _span_payload(s: dict, name: str, review_threshold: float, ta_threshold: float | None = None) -> dict:
+    out = {"start": s["start"], "end": s["end"],
+           "confidence": None if s["confidence"] is None else round(s["confidence"], 4)}
+    for key in ("block", "system", "model", "review_reasons", "systems_agree"):  # title/author extras
+        if key in s:
+            out[key] = s[key]
+    out["review_needed"] = needs_review(s, name, review_threshold, ta_threshold)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # output: JSON
 # ---------------------------------------------------------------------------
 
 def write_json(book_id: str, text_length: int, layers: dict[str, list[dict]],
-              errors: dict[str, str], out_dir: Path, review_threshold: float) -> Path:
+              errors: dict[str, str], out_dir: Path, review_threshold: float,
+              ta_threshold: float | None = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{book_id}.json"
     payload = {
         "book_id": book_id,
         "text_length": text_length,
-        "layers": {name: [{"start": s["start"], "end": s["end"], "confidence": round(s["confidence"], 4),
-                          "review_needed": s["confidence"] < review_threshold}
-                         for s in spans]
+        "layers": {name: [_span_payload(s, name, review_threshold, ta_threshold) for s in spans]
                   for name, spans in layers.items()},
     }
     if errors:
@@ -300,7 +333,7 @@ def write_html(book_id: str, text: str, layers: dict[str, list[dict]],
         if not chunk:
             continue
         if active:
-            shadows = ", ".join(f"inset 0 -{2 + 2 * i}px {LAYERS[n].color}"
+            shadows = ", ".join(f"inset 0 -{2 + 2 * i}px {LAYERS[base_layer(n)].color}"
                                 for i, n in enumerate(sorted(active)))
             title = ", ".join(sorted(active))
             parts.append(f'<span class="span" style="box-shadow:{shadows}" title="{title}">{chunk}</span>')
@@ -310,7 +343,7 @@ def write_html(book_id: str, text: str, layers: dict[str, list[dict]],
 
     counts = {name: len(spans) for name, spans in layers.items()}
     legend = "".join(
-        f'<div class="legend-row"><span class="swatch" style="background:{LAYERS[n].color}"></span>'
+        f'<div class="legend-row"><span class="swatch" style="background:{LAYERS[base_layer(n)].color}"></span>'
         f'{n} <span class="mut">({counts.get(n, 0)} spans'
         + (f", {errors[n]}" if n in errors else "")
         + ')</span></div>'
@@ -358,6 +391,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="do not drop tsawa spans that mostly overlap a predicted "
                          "quotation span. Default: drop when coverage >= 0.5 and "
                          "the quotation *model* produced spans. Does not use gold.")
+    ap.add_argument("--title-author-review-threshold", type=float, default=None,
+                    help="a title/author span with confidence below this is flagged review_needed "
+                         "(wins over --review-threshold for those layers). Default: --review-threshold.")
+    ap.add_argument("--title-author-opf", action="store_true",
+                    help="NOT IMPLEMENTED: writing title/author as OpenPecha layers (the layer names are not "
+                         "known). Switching it on is an error; --opf alone skips these layers.")
     ap.add_argument("--review-threshold", type=float, default=0.7,
                     help="a span with confidence below this is flagged review_needed")
     return ap.parse_args(argv)
@@ -365,6 +404,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.title_author_opf:
+        raise SystemExit("--title-author-opf is not implemented: the OpenPecha layer names for title and "
+                         "author are not known. Leave it off; --opf writes the other layers only.")
     files = sorted(args.input.glob("*.json"))
     if not files:
         raise SystemExit(f"no predictions JSON files found in {args.input}")
@@ -398,7 +440,8 @@ def main(argv=None) -> int:
                   f"{ {n: c for n, c in dropped_non_tibetan.items() if c} }", file=sys.stderr)
 
         if args.json:
-            p = write_json(book_id, text_length, layers, errors, args.out, args.review_threshold)
+            p = write_json(book_id, text_length, layers, errors, args.out, args.review_threshold,
+                           args.title_author_review_threshold)
             print(f"[{i}/{len(files)}] wrote {p}")
         if args.html:
             p = write_html(book_id, text, layers, errors, args.out)
@@ -407,12 +450,14 @@ def main(argv=None) -> int:
             source_path = Path(preprocessed["source_path"])
             root = opf_root_for(source_path)
             plain = root is None
-            opf_layers = layers
+            opf_layers = {n: sp for n, sp in layers.items() if not is_title_author(n)}
+            if any(is_title_author(n) and sp for n, sp in layers.items()):
+                print(f"  [note] {book_id}: title/author are not written to .opf (not implemented)", file=sys.stderr)
             if plain:
                 if source_path.is_file():
                     norm_text, src = normalize_tsegs_tracked(text)
                     root = write_plain_opf(book_id, norm_text, args.out)
-                    opf_layers = remap_layers(layers, src)
+                    opf_layers = remap_layers(opf_layers, src)
                 else:
                     print(f"  [warn] {book_id}: {source_path} not found; "
                           f"skipping --opf output for this book", file=sys.stderr)
@@ -421,7 +466,8 @@ def main(argv=None) -> int:
                 for p in write_opf_layers(opf_layers, root, subdir):
                     print(f"[{i}/{len(files)}] wrote {p}")
 
-        review_needed = {n: sum(1 for s in spans if s["confidence"] < args.review_threshold)
+        review_needed = {n: sum(1 for s in spans
+                               if needs_review(s, n, args.review_threshold, args.title_author_review_threshold))
                          for n, spans in layers.items()}
         combined_errors = dict(errors)
         if preprocessed.get("errors"):
@@ -451,6 +497,7 @@ def main(argv=None) -> int:
     run_log = args.out / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     run_log.write_text(json.dumps({
         "review_threshold": args.review_threshold,
+        "title_author_review_threshold": args.title_author_review_threshold,
         "books": summary,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {run_log}")

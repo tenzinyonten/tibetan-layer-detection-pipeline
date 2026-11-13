@@ -39,7 +39,7 @@ from .decode import (
     overlap_regions, softmax, span_confidences, spans_from_bio, spans_from_bioe,
     transition_matrix, viterbi, viterbi_bioe,
 )
-from .layer_config import LAYERS, LayerConfig
+from .layer_config import LAYERS, TITLE_AUTHOR_MODEL, LayerConfig, TitleAuthorOptions
 from .windows import pack_window_for_inference, sliding_windows, special_token_ids
 
 CONTENT_MAX = 8190  # max_length 8192 - CLS - SEP, shared by every layer here
@@ -251,14 +251,17 @@ def already_done(book_id: str, out_dir: Path) -> bool:
 
 
 def infer_one(book: dict, layer_names: list[str], device: str,
-             stride: int | None = None, dual_window: bool = False) -> dict:
+             stride: int | None = None, dual_window: bool = False,
+             ta: TitleAuthorOptions | None = None) -> dict:
     """book is one Stage 1 payload (book_id + text, at least). Returns the
     predictions payload: raw (unrounded) confidence per span, plus n_windows,
     elapsed_s and short_spans_removed per layer and any per-layer errors.
 
     stride: see run_layer -- None keeps each layer's own configured stride.
     dual_window: see run_layer_dual -- doubles inference time per layer when
-        True; each span gets an extra "dual_window_agreement" field."""
+        True; each span gets an extra "dual_window_agreement" field.
+    ta: how the title/author layers run (see layer_config.TitleAuthorOptions);
+        stride and dual_window do not apply to them."""
     text, book_id = book["text"], book["book_id"]
     layers: dict[str, list[dict]] = {}
     n_windows: dict[str, int] = {}
@@ -266,6 +269,8 @@ def infer_one(book: dict, layer_names: list[str], device: str,
     short_spans_removed: dict[str, int] = {}
     errors: dict[str, str] = {}
     for name in layer_names:
+        if LAYERS[name].kind == "head_tail":
+            continue  # title/author: handled together below, one forward pass for both fields
         t0 = time.time()
         try:
             tok, model = load_layer_model(name, device)
@@ -294,6 +299,14 @@ def infer_one(book: dict, layer_names: list[str], device: str,
             errors[name] = f"inference failed: {e}"
             print(f"  [warn] {book_id}: layer '{name}' failed: {e}", file=sys.stderr)
         elapsed_s[name] = round(time.time() - t0, 2)
+    ta_fields = [n for n in layer_names if LAYERS[n].kind == "head_tail"]
+    if ta_fields:
+        from .title_author import run_title_author
+        ta_layers, ta_elapsed, ta_errors = run_title_author(text, ta_fields, ta or TitleAuthorOptions(), device)
+        layers.update(ta_layers)
+        elapsed_s.update(ta_elapsed)
+        errors.update(ta_errors)
+        n_windows.update({n: 1 for n in ta_layers})
     return {"book_id": book_id, "layers": layers, "n_windows": n_windows,
             "elapsed_s": elapsed_s, "short_spans_removed": short_spans_removed, "errors": errors}
 
@@ -313,6 +326,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--out", type=Path, required=True, help="folder to write predictions JSONs into")
     ap.add_argument("--layers", nargs="+", choices=list(LAYERS), default=None)
     ap.add_argument("--all", action="store_true", help="run every layer with a model configured")
+    ap.add_argument("--title-author-system", choices=["model", "skill", "both"], default="model",
+                    help="how the title/author layers run: the trained model (default, free, local), "
+                         "the LLM skill (PAID: one LLM call per book; needs GEMINI_API_KEY or "
+                         "ANTHROPIC_API_KEY), or both side by side (title/author from the model, "
+                         "title_skill/author_skill from the skill, no rule choosing between them).")
+    ap.add_argument("--title-model", default=TITLE_AUTHOR_MODEL,
+                    help="Hugging Face repo (or local folder) of the model that finds the title")
+    ap.add_argument("--author-model", default=TITLE_AUTHOR_MODEL,
+                    help="Hugging Face repo (or local folder) of the model that finds the author")
+    ap.add_argument("--title-author-skill-model", default=TitleAuthorOptions.skill_model,
+                    help="LLM the skill calls when --title-author-system is skill or both")
+    ap.add_argument("--title-author-skill-dir", default=None,
+                    help="folder holding title_author_skill.py (default: $TA_SKILL_DIR; this repo has no copy)")
     ap.add_argument("--device", default="cuda" if _has_cuda() else "cpu")
     ap.add_argument("--stride", type=int, default=None,
                     help="override every selected layer's window stride (smaller = more "
@@ -352,6 +378,12 @@ def main(argv=None) -> int:
     if not files:
         raise SystemExit(f"no preprocessed JSON files found in {args.input}")
     args.out.mkdir(parents=True, exist_ok=True)
+    ta_options = TitleAuthorOptions(
+        system=args.title_author_system, title_model=args.title_model, author_model=args.author_model,
+        skill_model=args.title_author_skill_model, skill_dir=args.title_author_skill_dir)
+    if args.title_author_system in ("skill", "both") and any(LAYERS[n].kind == "head_tail" for n in layer_names):
+        print(f"  [note] title/author skill: one PAID LLM call ({ta_options.skill_model}) per book, "
+              f"{len(files)} book(s); no keys are stored, they come from the environment", file=sys.stderr)
 
     n_done = n_skipped = 0
     for i, fp in enumerate(files, 1):
@@ -364,7 +396,7 @@ def main(argv=None) -> int:
 
         t0 = time.time()
         result = infer_one(book, layer_names, args.device, stride=args.stride,
-                          dual_window=args.dual_window)
+                          dual_window=args.dual_window, ta=ta_options)
         elapsed = time.time() - t0
         out_path = args.out / f"{book_id}.json"
         out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
