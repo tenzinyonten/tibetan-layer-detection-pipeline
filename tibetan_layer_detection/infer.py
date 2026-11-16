@@ -331,6 +331,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "the LLM skill (PAID: one LLM call per book; needs GEMINI_API_KEY or "
                          "ANTHROPIC_API_KEY), or both side by side (title/author from the model, "
                          "title_skill/author_skill from the skill, no rule choosing between them).")
+    ap.add_argument("--title-system", choices=["model", "skill"], default=None,
+                    help="which system finds the title: the trained model or the LLM skill (PAID). "
+                         "Default: follows --title-author-system, which defaults to model.")
+    ap.add_argument("--author-system", choices=["model", "skill"], default=None,
+                    help="which system finds the author: the trained model or the LLM skill (PAID). "
+                         "Default: follows --title-author-system, which defaults to model. "
+                         "--title-system model --author-system skill scored best on the test split "
+                         "(title 0.842, author 0.756); it is a fixed choice per field, not a rule per work.")
     ap.add_argument("--title-model", default=TITLE_MODEL,
                     help="Hugging Face repo (or local folder) of the model that finds the title. "
                          "Default: the title-only model (3 labels, Viterbi penalty 6). The joint "
@@ -382,12 +390,18 @@ def main(argv=None) -> int:
     if not files:
         raise SystemExit(f"no preprocessed JSON files found in {args.input}")
     args.out.mkdir(parents=True, exist_ok=True)
-    ta_options = TitleAuthorOptions(
-        system=args.title_author_system, title_model=args.title_model, author_model=args.author_model,
-        skill_model=args.title_author_skill_model, skill_dir=args.title_author_skill_dir)
-    if args.title_author_system in ("skill", "both") and any(LAYERS[n].kind == "head_tail" for n in layer_names):
-        print(f"  [note] title/author skill: one PAID LLM call ({ta_options.skill_model}) per book, "
-              f"{len(files)} book(s); no keys are stored, they come from the environment", file=sys.stderr)
+    try:
+        ta_options = TitleAuthorOptions(
+            system=args.title_author_system, title_system=args.title_system, author_system=args.author_system,
+            title_model=args.title_model, author_model=args.author_model,
+            skill_model=args.title_author_skill_model, skill_dir=args.title_author_skill_dir)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    from .title_author import skill_note
+    note = skill_note(ta_options, [n for n in layer_names if LAYERS[n].kind == "head_tail"],
+                      sum(1 for fp in files if not already_done(fp.stem, args.out)))
+    if note:
+        print(f"  [note] {note}", file=sys.stderr)
 
     n_done = n_skipped = 0
     for i, fp in enumerate(files, 1):

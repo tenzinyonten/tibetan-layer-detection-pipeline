@@ -49,6 +49,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "layers/predicted/ (never layers/v001/)")
     ap.add_argument("--title-author-system", choices=["model", "skill", "both"], default="model",
                     help="title/author layers: the trained model (default), the PAID LLM skill, or both")
+    ap.add_argument("--title-system", choices=["model", "skill"], default=None,
+                    help="which system finds the title (default: follows --title-author-system, i.e. model)")
+    ap.add_argument("--author-system", choices=["model", "skill"], default=None,
+                    help="which system finds the author (PAID if skill; title model + author skill scored best)")
     ap.add_argument("--title-model", default=None, help="Hugging Face repo for the title model")
     ap.add_argument("--author-model", default=None, help="Hugging Face repo for the author model")
     ap.add_argument("--title-author-skill-model", default=None, help="LLM the skill calls (skill/both)")
@@ -92,7 +96,8 @@ def main(argv=None) -> int:
     if args.dual_window:
         infer_argv += ["--dual-window"]
     infer_argv += ["--title-author-system", args.title_author_system]
-    for flag, val in (("--title-model", args.title_model), ("--author-model", args.author_model),
+    for flag, val in (("--title-system", args.title_system), ("--author-system", args.author_system),
+                      ("--title-model", args.title_model), ("--author-model", args.author_model),
                       ("--title-author-skill-model", args.title_author_skill_model),
                       ("--title-author-skill-dir", args.title_author_skill_dir)):
         if val:

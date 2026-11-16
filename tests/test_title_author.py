@@ -26,6 +26,10 @@ from tibetan_layer_detection import title_author as TA  # noqa: E402
 from tibetan_layer_detection.layer_config import (AUTHOR_MODEL, JOINT_MODEL, LAYERS, TITLE_MODEL, TitleAuthorOptions,  # noqa: E402
                                  base_layer)
 
+SKILL_DIR = Path(os.environ.get("TA_SKILL_DIR") or ROOT / "title_author/skills/tibetan-title-author/scripts")
+needs_skill = unittest.skipUnless((SKILL_DIR / "title_author_skill.py").is_file(),
+                                  "the skill is not here: set TA_SKILL_DIR to its scripts folder")
+
 CLS, SEP = 0, 1
 ID2LABEL = {0: "O", 1: "B-TITLE", 2: "I-TITLE", 3: "B-AUTHOR", 4: "I-AUTHOR"}
 
@@ -294,19 +298,115 @@ class Systems(unittest.TestCase):
         self.assertIn("no access", errors["title"])
         self.assertIn("no access", errors["author"])
 
-    @unittest.skipUnless(os.environ.get("TA_SKILL_DIR") and (Path(os.environ["TA_SKILL_DIR"]) / "title_author_skill.py").is_file(),
-                         "the skill is not bundled here: set TA_SKILL_DIR to its scripts folder")
+    @needs_skill
     def test_skill_locates_its_answers_with_a_stub_llm(self):
         text = "༄༅། །བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ། ། རྒྱལ་བ་ཐམས་ཅད། །\n" * 3 + "རྩོམ་པ་པོ། དགེ་སློང་བློ་བཟང་གིས་སྦྱར།"
         stub = lambda system, user: json.dumps(  # noqa: E731
             {"title": "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ", "title_region": "head",
              "author": "དགེ་སློང་བློ་བཟང་", "author_region": "head"}, ensure_ascii=False)
-        out = TA.run_skill(text, ["title", "author"], TitleAuthorOptions(system="skill"), call_llm=stub)
+        out = TA.run_skill(text, ["title", "author"], TitleAuthorOptions(system="skill", skill_dir=str(SKILL_DIR)), call_llm=stub)
         t, a = out["title"][0], out["author"][0]
         self.assertEqual(text[t["start"]:t["end"]], "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ")
         self.assertEqual(text[a["start"]:a["end"]], "དགེ་སློང་བློ་བཟང་")
         self.assertEqual((t["system"], t["confidence"], t["block"]), ("skill", None, "whole"))
         self.assertIn("review_needed", t)
+
+
+class PerFieldSystems(unittest.TestCase):
+    """--title-system / --author-system: a fixed choice per field, never a rule per work."""
+
+    def setUp(self):
+        self._rm, self._rs = TA.run_model, TA.run_skill
+        self.calls = []
+        span = lambda s, e, **kw: {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}  # noqa: E731
+
+        def fake_model(text, fields, repo, device, k=3000, bp=None, strip=None):
+            self.calls.append(("model", repo, tuple(fields)))
+            return {f: [span(0, 5, system="model")] for f in fields}
+
+        def fake_skill(text, fields, opts, call_llm=None, k=3000):
+            self.calls.append(("skill", tuple(fields)))
+            return {f: [span(10, 20, system="skill", confidence=None, review_needed=True,
+                             review_reasons=["author was weak"])] for f in fields}
+        TA.run_model, TA.run_skill = fake_model, fake_skill
+
+    def tearDown(self):
+        TA.run_model, TA.run_skill = self._rm, self._rs
+
+    def test_title_from_the_model_and_author_from_the_skill(self):
+        opts = TitleAuthorOptions(title_system="model", author_system="skill")
+        layers, _, errors = TA.run_title_author("x" * 50, ["title", "author"], opts, "cpu")
+        self.assertEqual(self.calls, [("model", TITLE_MODEL, ("title",)), ("skill", ("author",))])   # the model is not asked for the author
+        self.assertEqual(set(layers), {"title", "author"})                                          # plain names, no _skill keys
+        self.assertEqual((layers["title"][0]["system"], layers["author"][0]["system"]), ("model", "skill"))
+        self.assertEqual(layers["author"][0]["review_reasons"], ["author was weak"])                 # the skill's review flag carries over
+        self.assertTrue(layers["author"][0]["review_needed"])
+        self.assertNotIn("systems_agree", layers["author"][0])                                       # no comparison: one system per field
+        self.assertEqual(errors, {})
+
+    def test_defaults_are_the_model_for_both_fields_and_no_skill_call(self):
+        layers, _, _ = TA.run_title_author("x" * 50, ["title", "author"], TitleAuthorOptions(), "cpu")
+        self.assertEqual([c[0] for c in self.calls], ["model", "model"])
+        self.assertEqual({f: layers[f][0]["system"] for f in layers}, {"title": "model", "author": "model"})
+
+    def test_the_shortcut_still_sets_both_fields(self):
+        TA.run_title_author("x" * 50, ["title", "author"], TitleAuthorOptions(system="skill"), "cpu")
+        self.assertEqual(self.calls, [("skill", ("title", "author"))])
+        self.assertEqual(TitleAuthorOptions(system="skill", author_system="model").field_system("author"), "model")  # a per-field value wins
+
+    def test_a_skill_failure_is_an_error_for_that_field_with_no_fallback_to_the_model(self):
+        def boom(text, fields, opts, call_llm=None, k=3000):
+            raise RuntimeError("set GEMINI_API_KEY in the environment")
+        TA.run_skill = boom
+        layers, _, errors = TA.run_title_author("x" * 50, ["title", "author"],
+                                                TitleAuthorOptions(title_system="model", author_system="skill"), "cpu")
+        self.assertEqual(set(layers), {"title"})
+        self.assertEqual(set(errors), {"author"})
+        self.assertIn("GEMINI_API_KEY", errors["author"])
+        self.assertEqual([c[0] for c in self.calls], ["model"])                                      # the model was NOT asked for the author
+
+    def test_only_the_requested_fields_run(self):
+        opts = TitleAuthorOptions(title_system="model", author_system="skill")
+        layers, _, _ = TA.run_title_author("x" * 50, ["author"], opts, "cpu")
+        self.assertEqual(self.calls, [("skill", ("author",))])
+        self.assertEqual(set(layers), {"author"})
+
+    def test_invalid_choices_are_errors(self):
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(system="both", author_system="skill")        # both = side by side; cannot mix with a per-field choice
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(title_system="both")
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(system="nope")
+
+    def test_the_cost_note(self):
+        fields = ["title", "author"]
+        self.assertIsNone(TA.skill_note(TitleAuthorOptions(), fields, 100))                         # the free default prints nothing
+        note = TA.skill_note(TitleAuthorOptions(title_system="model", author_system="skill"), fields, 100)
+        self.assertIn("PAID", note)
+        self.assertIn("Rs 29.00", note)                                                             # 100 books x about 0.29
+        self.assertIn("author from the skill", note)
+        self.assertIsNone(TA.skill_note(TitleAuthorOptions(author_system="skill"), ["title"], 100))  # the skill is not used for a title-only run
+        self.assertIn("both systems", TA.skill_note(TitleAuthorOptions(system="both"), fields, 1))
+
+
+@needs_skill
+class SkillStubOneCall(unittest.TestCase):
+    def test_one_call_per_work_no_second_look_and_the_skills_title_is_ignored(self):
+        text = "༄༅། །བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ། ། རྒྱལ་བ་ཐམས་ཅད། །\n" * 3 + "རྩོམ་པ་པོ། དགེ་སློང་བློ་བཟང་གིས་སྦྱར།"
+        n = []
+
+        def stub(system, user):
+            n.append(1)
+            return json.dumps({"title": "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ", "title_region": "head",
+                               "author": "དགེ་སློང་བློ་བཟང་", "author_region": "head"}, ensure_ascii=False)
+        opts = TitleAuthorOptions(title_system="model", author_system="skill", skill_dir=str(SKILL_DIR))
+        out = TA.run_skill(text, ["author"], opts, call_llm=stub)
+        self.assertEqual(len(n), 1)                                   # one LLM call, no second look
+        self.assertEqual(set(out), {"author"})                        # its title answer was ignored
+        a = out["author"][0]
+        self.assertEqual(text[a["start"]:a["end"]], "དགེ་སློང་བློ་བཟང་")
+        self.assertIn("review_reasons", a)
 
 
 class Config(unittest.TestCase):

@@ -51,6 +51,7 @@ MAX_SEQUENCE = 8192                      # the model's window; head + tail is ab
 SNAP_LIMIT = 600                         # how far a crop edge may move to reach a line start
 
 SKILL_SUBDIR = "title_author/skills/tibetan-title-author/scripts"
+SKILL_COST_INR_PER_WORK = 0.29  # about, at the batch price; live calls cost more
 
 
 # ---------------------------------------------------------------------------
@@ -377,48 +378,65 @@ def _iou(a: dict, b: dict) -> float:
 def run_title_author(text: str, fields: list[str], opts: TitleAuthorOptions, device: str,
                      call_llm=None) -> tuple[dict[str, list[dict]], dict[str, float], dict[str, str]]:
     """Returns (layers, elapsed_s, errors). `fields` is a subset of ("title", "author").
-    system "model": layers[field] from the trained model.
-    system "skill": layers[field] from the skill.
-    system "both":  layers[field] from the model and layers[field + "_skill"] from
-                    the skill, side by side; each span gets systems_agree
-                    (IoU >= 0.5 between the two, the benchmark's own rule)."""
+    Each field is answered by ONE system, chosen per field (opts.title_system /
+    opts.author_system, else opts.system): "model" is the trained model, "skill" the
+    LLM skill (its answer for the other field is ignored). The choice is fixed, not
+    a rule per work, and a skill failure is an error for that field, not a silent
+    fallback to the model. Spans come back under the plain names, with "system" set.
+    opts.system "both" instead runs both systems for every field: layers[field] from
+    the model and layers[field + "_skill"] from the skill, side by side; each span
+    gets systems_agree (IoU >= 0.5 between the two, the benchmark's own rule)."""
     layers: dict[str, list[dict]] = {}
     elapsed: dict[str, float] = {}
     errors: dict[str, str] = {}
     model_of = {"title": opts.title_model, "author": opts.author_model}
+    both = opts.side_by_side
+    model_fields = [f for f in fields if both or opts.field_system(f) == "model"]
+    skill_fields = [f for f in fields if both or opts.field_system(f) == "skill"]
     result: dict[str, dict[str, list[dict]]] = {}
-    if opts.system in ("model", "both"):
-        for repo in dict.fromkeys(model_of[f] for f in fields):  # one forward pass per distinct model
-            mine = [f for f in fields if model_of[f] == repo]
-            t0 = time.time()
-            try:
-                got = run_model(text, mine, repo, device, opts.crop_chars, opts.break_penalty, opts.strip_underscore)
-            except Exception as e:
-                for f in mine:
-                    errors[f] = f"model load or inference failed: {e}"
-                print(f"  [warn] title/author model {repo} failed: {e}", file=sys.stderr)
-                continue
-            for f in mine:
-                layers[f] = got[f]
-                elapsed[f] = round(time.time() - t0, 2)
-        result["model"] = {f: layers.get(f, []) for f in fields}
-    if opts.system in ("skill", "both"):
+    for repo in dict.fromkeys(model_of[f] for f in model_fields):  # one forward pass per distinct model
+        mine = [f for f in model_fields if model_of[f] == repo]
         t0 = time.time()
         try:
-            got = run_skill(text, fields, opts, call_llm, opts.crop_chars)
+            got = run_model(text, mine, repo, device, opts.crop_chars, opts.break_penalty, opts.strip_underscore)
         except Exception as e:
-            for f in fields:
-                errors[f if opts.system == "skill" else f + "_skill"] = f"skill failed: {e}"
+            for f in mine:
+                errors[f] = f"model load or inference failed: {e}"
+            print(f"  [warn] title/author model {repo} failed: {e}", file=sys.stderr)
+            continue
+        for f in mine:
+            layers[f] = got[f]
+            elapsed[f] = round(time.time() - t0, 2)
+    if model_fields:
+        result["model"] = {f: layers.get(f, []) for f in model_fields}
+    if skill_fields:
+        name = (lambda f: f + "_skill") if both else (lambda f: f)
+        t0 = time.time()
+        try:
+            got = run_skill(text, skill_fields, opts, call_llm, opts.crop_chars)
+        except Exception as e:
+            for f in skill_fields:
+                errors[name(f)] = f"skill failed: {e}"
             print(f"  [warn] title/author skill failed: {e}", file=sys.stderr)
         else:
-            for f in fields:
-                layers[f if opts.system == "skill" else f + "_skill"] = got[f]
-                elapsed[f if opts.system == "skill" else f + "_skill"] = round(time.time() - t0, 2)
+            for f in skill_fields:
+                layers[name(f)] = got[f]
+                elapsed[name(f)] = round(time.time() - t0, 2)
             result["skill"] = got
-    if opts.system == "both" and "model" in result and "skill" in result:
+    if both and "model" in result and "skill" in result:
         for f in fields:
             m, s = result["model"].get(f, []), result["skill"].get(f, [])
             agree = bool(m and s and _iou(m[0], s[0]) >= 0.5)
             for sp in m + s:
                 sp["systems_agree"] = agree
     return layers, elapsed, errors
+
+
+def skill_note(opts: TitleAuthorOptions, fields: list[str], n_books: int) -> str | None:
+    """The line printed before a run that will make paid LLM calls, or None if it will not."""
+    if not any(opts.side_by_side or opts.field_system(f) == "skill" for f in fields):
+        return None
+    which = "both systems" if opts.side_by_side else ", ".join(f"{f} from the {opts.field_system(f)}" for f in fields)
+    return (f"title/author skill: one PAID LLM call ({opts.skill_model}) per book ({which}); {n_books} book(s) = "
+            f"about Rs {SKILL_COST_INR_PER_WORK * n_books:.2f} at the batch price (live calls cost more). "
+            f"No keys are stored; they come from the environment.")

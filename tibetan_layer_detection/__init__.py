@@ -37,6 +37,7 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
           on_stage=None, title_author_system: str = "model", title_model: str | None = None,
           author_model: str | None = None, title_author_skill_model: str | None = None,
           title_author_skill_dir: str | None = None, title_author_opf: bool = False,
+          title_system: str | None = None, author_system: str | None = None,
           title_author_review_threshold: float | None = None):
     """Run the full three-stage pipeline in-process and return the result(s).
 
@@ -60,6 +61,12 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         "skill" (the LLM skill: PAID, one call per book, needs GEMINI_API_KEY or
         ANTHROPIC_API_KEY in the environment) or "both" (title/author from the
         model, title_skill/author_skill from the skill, side by side).
+    title_system / author_system: "model" or "skill" for one field (default: follow
+        title_author_system). title_system="model", author_system="skill" scored
+        best on the test split (title 0.842, author 0.756): a fixed choice per
+        field, not a rule per work; the skill part is PAID (one call per book,
+        about Rs 0.29 at the batch price, more for live calls). Cannot be
+        combined with title_author_system="both".
     title_model / author_model: Hugging Face repo (or local folder) per field;
         default is Yontenn/mmbert-title-only and Yontenn/mmbert-author-only
         (private; each needs HF_TOKEN or a stored login; one forward pass per
@@ -113,7 +120,8 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         infer_argv = ["--input", str(pre_dir), "--out", str(pred_dir),
                      "--layers", *layer_names, "--device", device,
                      "--title-author-system", title_author_system]
-        for flag, val in (("--title-model", title_model), ("--author-model", author_model),
+        for flag, val in (("--title-system", title_system), ("--author-system", author_system),
+                          ("--title-model", title_model), ("--author-model", author_model),
                           ("--title-author-skill-model", title_author_skill_model),
                           ("--title-author-skill-dir", title_author_skill_dir)):
             if val:

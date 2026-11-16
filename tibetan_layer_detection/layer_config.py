@@ -79,7 +79,10 @@ def base_layer(name: str) -> str:
 class TitleAuthorOptions:
     """How the title/author layers are run. Stage 2 reads system, the models and
     the skill settings; Stage 3 reads opf and review_threshold. Defaults are free and local."""
-    system: str = "model"                  # "model", "skill" or "both"
+    system: str = "model"                  # a shortcut for both fields: "model", "skill", or "both" (the two systems side by side)
+    title_system: str | None = None        # "model" or "skill" for the title; None follows `system`
+    author_system: str | None = None       # "model" or "skill" for the author; None follows `system`. title "model" + author
+    # "skill" scored best on the test split (2,384 works): title 0.842, author 0.756. A fixed choice per field, not a rule per work.
     title_model: str = TITLE_MODEL         # a Hugging Face repo, or a local folder
     author_model: str = AUTHOR_MODEL       # the joint JOINT_MODEL also works here; if both fields use it, one forward pass serves both
     skill_model: str = "gemini-3.8-flash"  # only used by system "skill" / "both"; PAID, needs GEMINI_API_KEY or ANTHROPIC_API_KEY
@@ -91,6 +94,25 @@ class TitleAuthorOptions:
     # single-entity model (trained on text without them), no for the joint one
     opf: bool = False                      # .opf output for title/author: not implemented, raises if switched on
     review_threshold: float | None = None  # None: the global review threshold (--review-threshold, 0.7)
+
+    def __post_init__(self):
+        if self.system not in ("model", "skill", "both"):
+            raise ValueError(f"system must be model, skill or both, not {self.system!r}")
+        for name in ("title_system", "author_system"):
+            v = getattr(self, name)
+            if v not in (None, "model", "skill"):
+                raise ValueError(f"{name} must be model or skill, not {v!r}")
+        if self.system == "both" and (self.title_system or self.author_system):
+            raise ValueError("system 'both' runs the two systems side by side and cannot be combined with "
+                             "title_system / author_system (use those two alone to pick a system per field)")
+
+    @property
+    def side_by_side(self) -> bool:
+        return self.system == "both"
+
+    def field_system(self, field: str) -> str:
+        """"model" or "skill" for one field (never "both": that mode runs both systems for every field)."""
+        return getattr(self, field + "_system") or ("skill" if self.system == "skill" else "model")
 
 
 LAYERS: dict[str, LayerConfig] = {
