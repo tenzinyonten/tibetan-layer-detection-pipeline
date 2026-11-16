@@ -55,7 +55,13 @@ class LayerConfig:
     # split when the Sabche model is next run, and set shad_rule=False for sabche if it does not hold.
 
 
-TITLE_AUTHOR_MODEL = "Yontenn/mmbert-title-author-run2"  # private; weights are in its best/ folder
+# All private; weights are in each repo's best/ folder. The two single-entity models know one field
+# each (3 labels O, B, I); the joint model knows both (5 labels). Test, 2,384 works, share correct at IoU >= 0.5:
+# joint (penalty 12) title 0.833 / author 0.711; title-only + author-only (penalty 6) 0.842 / 0.734.
+TITLE_MODEL = "Yontenn/mmbert-title-only"
+AUTHOR_MODEL = "Yontenn/mmbert-author-only"
+JOINT_MODEL = "Yontenn/mmbert-title-author-run2"
+TITLE_AUTHOR_MODEL = JOINT_MODEL  # the earlier name, kept for callers that import it
 TA_FIELDS = ("title", "author")
 TA_LAYER_NAMES = TA_FIELDS + tuple(f + "_skill" for f in TA_FIELDS)  # the _skill ones appear with system "both"
 
@@ -73,15 +79,40 @@ def base_layer(name: str) -> str:
 class TitleAuthorOptions:
     """How the title/author layers are run. Stage 2 reads system, the models and
     the skill settings; Stage 3 reads opf and review_threshold. Defaults are free and local."""
-    system: str = "model"                  # "model", "skill" or "both"
-    title_model: str = TITLE_AUTHOR_MODEL  # a Hugging Face repo, or a local folder
-    author_model: str = TITLE_AUTHOR_MODEL  # same joint model for both until the single-entity models exist
+    system: str = "model"                  # a shortcut for both fields: "model", "skill", or "both" (the two systems side by side)
+    title_system: str | None = None        # "model" or "skill" for the title; None follows `system`
+    author_system: str | None = None       # "model" or "skill" for the author; None follows `system`. title "model" + author
+    # "skill" scored best on the test split (2,384 works): title 0.842, author 0.756. A fixed choice per field, not a rule per work.
+    title_model: str = TITLE_MODEL         # a Hugging Face repo, or a local folder
+    author_model: str = AUTHOR_MODEL       # the joint JOINT_MODEL also works here; if both fields use it, one forward pass serves both
     skill_model: str = "gemini-3.8-flash"  # only used by system "skill" / "both"; PAID, needs GEMINI_API_KEY or ANTHROPIC_API_KEY
     skill_dir: str | None = None           # folder holding title_author_skill.py (default: TA_SKILL_DIR, else the repo's)
     crop_chars: int = 3000                 # characters kept at each end
-    break_penalty: float = 12.0            # Viterbi; picked on validation (the trainer used 5)
+    break_penalty: float | None = None     # Viterbi. None: per model -- 6 for a single-entity model, 12 for the joint
+    # one (both picked on validation); a number applies to every model alike
+    strip_underscore: bool | None = None   # remove "_" from the input before tokenizing. None: per model -- yes for a
+    # single-entity model (trained on text without them), no for the joint one
     opf: bool = False                      # .opf output for title/author: not implemented, raises if switched on
     review_threshold: float | None = None  # None: the global review threshold (--review-threshold, 0.7)
+
+    def __post_init__(self):
+        if self.system not in ("model", "skill", "both"):
+            raise ValueError(f"system must be model, skill or both, not {self.system!r}")
+        for name in ("title_system", "author_system"):
+            v = getattr(self, name)
+            if v not in (None, "model", "skill"):
+                raise ValueError(f"{name} must be model or skill, not {v!r}")
+        if self.system == "both" and (self.title_system or self.author_system):
+            raise ValueError("system 'both' runs the two systems side by side and cannot be combined with "
+                             "title_system / author_system (use those two alone to pick a system per field)")
+
+    @property
+    def side_by_side(self) -> bool:
+        return self.system == "both"
+
+    def field_system(self, field: str) -> str:
+        """"model" or "skill" for one field (never "both": that mode runs both systems for every field)."""
+        return getattr(self, field + "_system") or ("skill" if self.system == "skill" else "model")
 
 
 LAYERS: dict[str, LayerConfig] = {
@@ -121,16 +152,16 @@ LAYERS: dict[str, LayerConfig] = {
                "and zero true positives at this break penalty",
     ),
     "title": LayerConfig(
-        repo=TITLE_AUTHOR_MODEL, scheme="ta", break_penalty=12.0, stride=0, color="#b07df5",  # purple
-        source="Yontenn/mmbert-title-author-run2 docs/run2_results.md (Viterbi break penalty 12, picked on "
-               "validation); test title F1 0.828 on the older 2,389-work test",
+        repo=TITLE_MODEL, scheme="ta", break_penalty=6.0, stride=0, color="#b07df5",  # purple
+        source="Yontenn/mmbert-title-only, Viterbi break penalty 6 picked on validation; test title 0.842 "
+               "share correct (2,384 works; the joint model: 0.833)",
         kind="head_tail", extend_to_tsheg=False, merge_small_gaps=False,
         caveat="title/author reads only the first and last 3,000 characters and gives one title for the whole file",
     ),
     "author": LayerConfig(
-        repo=TITLE_AUTHOR_MODEL, scheme="ta", break_penalty=12.0, stride=0, color="#4dd8d8",  # teal
-        source="Yontenn/mmbert-title-author-run2 docs/run2_results.md (Viterbi break penalty 12, picked on "
-               "validation); test author F1 0.744 on the older 2,389-work test",
+        repo=AUTHOR_MODEL, scheme="ta", break_penalty=6.0, stride=0, color="#4dd8d8",  # teal
+        source="Yontenn/mmbert-author-only, Viterbi break penalty 6 picked on validation; test author 0.734 "
+               "share correct (2,384 works; the joint model: 0.711; the skill: 0.756)",
         kind="head_tail", extend_to_tsheg=False, merge_small_gaps=False,
         caveat="title/author reads only the first and last 3,000 characters and gives one author for the whole file",
     ),

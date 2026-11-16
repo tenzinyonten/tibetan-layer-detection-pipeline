@@ -23,7 +23,12 @@ sys.path.insert(0, str(ROOT))
 
 from tibetan_layer_detection import postprocess as P  # noqa: E402
 from tibetan_layer_detection import title_author as TA  # noqa: E402
-from tibetan_layer_detection.layer_config import LAYERS, TITLE_AUTHOR_MODEL, TitleAuthorOptions, base_layer  # noqa: E402
+from tibetan_layer_detection.layer_config import (AUTHOR_MODEL, JOINT_MODEL, LAYERS, TITLE_MODEL, TitleAuthorOptions,  # noqa: E402
+                                 base_layer)
+
+SKILL_DIR = Path(os.environ.get("TA_SKILL_DIR") or ROOT / "title_author/skills/tibetan-title-author/scripts")
+needs_skill = unittest.skipUnless((SKILL_DIR / "title_author_skill.py").is_file(),
+                                  "the skill is not here: set TA_SKILL_DIR to its scripts folder")
 
 CLS, SEP = 0, 1
 ID2LABEL = {0: "O", 1: "B-TITLE", 2: "I-TITLE", 3: "B-AUTHOR", 4: "I-AUTHOR"}
@@ -96,6 +101,32 @@ class Sequence(unittest.TestCase):
             self.assertNotIn(ids[pos], (CLS, SEP))
 
 
+class StripUnderscore(unittest.TestCase):
+    def test_tokens_are_built_without_underscores_but_offsets_point_into_the_original(self):
+        text = "ཀ_ཁ_ག ང"
+        plain = TA.build_sequence(text, CharTok(), strip_underscore=False)
+        strip = TA.build_sequence(text, CharTok(), strip_underscore=True)
+        self.assertEqual(len(plain["real"]), 7)
+        self.assertEqual(len(strip["real"]), 5)
+        self.assertNotIn(ord("_") + 10, strip["input_ids"])
+        self.assertEqual(strip["offsets"], [(0, 1), (2, 3), (4, 5), (5, 6), (6, 7)])   # ཀ ཁ ག space ང, in the original text
+
+    def test_a_decoded_span_may_contain_an_underscore_and_is_an_exact_substring(self):
+        text = "ཀ_ཁ_གངཅ"
+        seq = TA.build_sequence(text, CharTok(), strip_underscore=True)
+        out = TA.decode_fields(text, seq, logits_for(seq, {0: 1, 1: 2, 2: 2}, n_labels=3), {0: "O", 1: "B-TITLE", 2: "I-TITLE"}, ["title"])
+        sp = out["title"][0]
+        self.assertEqual(text[sp["start"]:sp["end"]], "ཀ_ཁ_ག")
+
+    def test_text_without_underscores_is_unchanged(self):
+        self.assertEqual(TA.build_sequence("ཀཁག", CharTok(), strip_underscore=True), TA.build_sequence("ཀཁག", CharTok()))
+
+    def test_which_models_get_stripped_text(self):
+        self.assertTrue(TA.uses_stripped_text({0: "O", 1: "B-AUTHOR", 2: "I-AUTHOR"}))
+        self.assertTrue(TA.uses_stripped_text({0: "O", 1: "B", 2: "I"}))
+        self.assertFalse(TA.uses_stripped_text(ID2LABEL))
+
+
 class Viterbi(unittest.TestCase):
     def test_transition_matrix_matches_the_reference_scorer(self):
         # the matrix in title_author/src/ta_mmbert_score.py, rebuilt here
@@ -108,6 +139,33 @@ class Viterbi(unittest.TestCase):
                 cont = 2 if i in (1, 2) else 4 if i in (3, 4) else None
                 if i != 0 and j != cont: ref[i, j] -= PEN
         np.testing.assert_array_equal(TA.transition_matrix(ID2LABEL, PEN), ref)
+
+    def test_single_entity_matrix_matches_the_reference_scorer(self):
+        # ta_mmbert_single_score.py trans_for(), rebuilt here, for a 3-label model
+        NEG, PEN = -1e9, 6.0
+        ref = np.zeros((3, 3))
+        for i in range(3):
+            for j in range(3):
+                if j == 2 and i not in (1, 2): ref[i, j] = NEG; continue
+                if i != 0 and j != (2 if i in (1, 2) else None): ref[i, j] -= PEN
+        for labels in ({0: "O", 1: "B-AUTHOR", 2: "I-AUTHOR"}, {0: "O", 1: "B", 2: "I"}):
+            np.testing.assert_array_equal(TA.transition_matrix(labels, PEN), ref)
+
+    def test_break_penalty_depends_on_the_model(self):
+        self.assertEqual(TA.default_break_penalty({0: "O", 1: "B-TITLE", 2: "I-TITLE"}), 6.0)
+        self.assertEqual(TA.default_break_penalty({0: "O", 1: "B", 2: "I"}), 6.0)
+        self.assertEqual(TA.default_break_penalty(ID2LABEL), 12.0)
+
+    def test_the_penalty_decides_whether_a_gap_splits_a_span(self):
+        # B I [gap] B I O: splitting beats bridging the gap by 5.5 minus the penalty, so a small penalty
+        # splits and a large one bridges (the bridge makes tokens 2 and 3 I, which is legal after an I)
+        labels = {0: "O", 1: "B-AUTHOR", 2: "I-AUTHOR"}
+        lg = np.zeros((6, 3))
+        lg[0, 1] = 5; lg[1, 2] = 5; lg[2, 0] = 1.5; lg[3, 1] = 5; lg[3, 2] = 1; lg[4, 2] = 5; lg[5, 0] = 5
+        spans = lambda pen: TA.entity_spans(TA.viterbi(lg, labels, pen), labels, "AUTHOR")  # noqa: E731
+        self.assertEqual(spans(0.5), [(0, 1), (3, 4)])
+        self.assertEqual(len(spans(20.0)), 1)               # one bridged span (a large penalty even keeps it running to the last token)
+        self.assertEqual(spans(20.0)[0][0], 0)
 
     def test_a_break_costs_the_penalty(self):
         lg = np.zeros((5, 5))
@@ -191,7 +249,7 @@ class Systems(unittest.TestCase):
         return {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}
 
     def test_both_puts_the_answers_side_by_side_with_an_agreement_flag(self):
-        TA.run_model = lambda text, fields, repo, device, k=3000, bp=12.0: {
+        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None: {
             "title": [self.span(0, 10, system="model")], "author": [self.span(50, 60, system="model")]}
         TA.run_skill = lambda text, fields, opts, call_llm=None, k=3000: {
             "title": [self.span(0, 12, system="skill", confidence=None)], "author": [self.span(200, 210, system="skill", confidence=None)]}
@@ -207,7 +265,7 @@ class Systems(unittest.TestCase):
         def boom(*a, **k):
             raise AssertionError("the skill must not be used in model mode")
         TA.run_skill = boom
-        TA.run_model = lambda text, fields, repo, device, k=3000, bp=12.0: {f: [] for f in fields}
+        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None: {f: [] for f in fields}
         layers, _, errors = TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(), "cpu")
         self.assertEqual((layers, errors), ({"title": [], "author": []}, {}))
 
@@ -218,12 +276,15 @@ class Systems(unittest.TestCase):
 
     def test_two_models_run_twice_one_model_runs_once(self):
         calls = []
-        def fake(text, fields, repo, device, k=3000, bp=12.0):
+        def fake(text, fields, repo, device, k=3000, bp=None, strip=None):
             calls.append((repo, tuple(fields)))
             return {f: [] for f in fields}
         TA.run_model = fake
-        TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(), "cpu")
-        self.assertEqual(calls, [(TITLE_AUTHOR_MODEL, ("title", "author"))])
+        TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(), "cpu")      # the defaults: two single-entity models
+        self.assertEqual(calls, [(TITLE_MODEL, ("title",)), (AUTHOR_MODEL, ("author",))])
+        calls.clear()
+        TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(title_model=JOINT_MODEL, author_model=JOINT_MODEL), "cpu")
+        self.assertEqual(calls, [(JOINT_MODEL, ("title", "author"))])                   # the joint model: one forward pass
         calls.clear()
         TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(title_model="a/t", author_model="a/a"), "cpu")
         self.assertEqual(calls, [("a/t", ("title",)), ("a/a", ("author",))])
@@ -237,14 +298,13 @@ class Systems(unittest.TestCase):
         self.assertIn("no access", errors["title"])
         self.assertIn("no access", errors["author"])
 
-    @unittest.skipUnless(os.environ.get("TA_SKILL_DIR") and (Path(os.environ["TA_SKILL_DIR"]) / "title_author_skill.py").is_file(),
-                         "the skill is not bundled here: set TA_SKILL_DIR to its scripts folder")
+    @needs_skill
     def test_skill_locates_its_answers_with_a_stub_llm(self):
         text = "༄༅། །བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ། ། རྒྱལ་བ་ཐམས་ཅད། །\n" * 3 + "རྩོམ་པ་པོ། དགེ་སློང་བློ་བཟང་གིས་སྦྱར།"
         stub = lambda system, user: json.dumps(  # noqa: E731
             {"title": "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ", "title_region": "head",
              "author": "དགེ་སློང་བློ་བཟང་", "author_region": "head"}, ensure_ascii=False)
-        out = TA.run_skill(text, ["title", "author"], TitleAuthorOptions(system="skill"), call_llm=stub)
+        out = TA.run_skill(text, ["title", "author"], TitleAuthorOptions(system="skill", skill_dir=str(SKILL_DIR)), call_llm=stub)
         t, a = out["title"][0], out["author"][0]
         self.assertEqual(text[t["start"]:t["end"]], "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ")
         self.assertEqual(text[a["start"]:a["end"]], "དགེ་སློང་བློ་བཟང་")
@@ -252,18 +312,119 @@ class Systems(unittest.TestCase):
         self.assertIn("review_needed", t)
 
 
+class PerFieldSystems(unittest.TestCase):
+    """--title-system / --author-system: a fixed choice per field, never a rule per work."""
+
+    def setUp(self):
+        self._rm, self._rs = TA.run_model, TA.run_skill
+        self.calls = []
+        span = lambda s, e, **kw: {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}  # noqa: E731
+
+        def fake_model(text, fields, repo, device, k=3000, bp=None, strip=None):
+            self.calls.append(("model", repo, tuple(fields)))
+            return {f: [span(0, 5, system="model")] for f in fields}
+
+        def fake_skill(text, fields, opts, call_llm=None, k=3000):
+            self.calls.append(("skill", tuple(fields)))
+            return {f: [span(10, 20, system="skill", confidence=None, review_needed=True,
+                             review_reasons=["author was weak"])] for f in fields}
+        TA.run_model, TA.run_skill = fake_model, fake_skill
+
+    def tearDown(self):
+        TA.run_model, TA.run_skill = self._rm, self._rs
+
+    def test_title_from_the_model_and_author_from_the_skill(self):
+        opts = TitleAuthorOptions(title_system="model", author_system="skill")
+        layers, _, errors = TA.run_title_author("x" * 50, ["title", "author"], opts, "cpu")
+        self.assertEqual(self.calls, [("model", TITLE_MODEL, ("title",)), ("skill", ("author",))])   # the model is not asked for the author
+        self.assertEqual(set(layers), {"title", "author"})                                          # plain names, no _skill keys
+        self.assertEqual((layers["title"][0]["system"], layers["author"][0]["system"]), ("model", "skill"))
+        self.assertEqual(layers["author"][0]["review_reasons"], ["author was weak"])                 # the skill's review flag carries over
+        self.assertTrue(layers["author"][0]["review_needed"])
+        self.assertNotIn("systems_agree", layers["author"][0])                                       # no comparison: one system per field
+        self.assertEqual(errors, {})
+
+    def test_defaults_are_the_model_for_both_fields_and_no_skill_call(self):
+        layers, _, _ = TA.run_title_author("x" * 50, ["title", "author"], TitleAuthorOptions(), "cpu")
+        self.assertEqual([c[0] for c in self.calls], ["model", "model"])
+        self.assertEqual({f: layers[f][0]["system"] for f in layers}, {"title": "model", "author": "model"})
+
+    def test_the_shortcut_still_sets_both_fields(self):
+        TA.run_title_author("x" * 50, ["title", "author"], TitleAuthorOptions(system="skill"), "cpu")
+        self.assertEqual(self.calls, [("skill", ("title", "author"))])
+        self.assertEqual(TitleAuthorOptions(system="skill", author_system="model").field_system("author"), "model")  # a per-field value wins
+
+    def test_a_skill_failure_is_an_error_for_that_field_with_no_fallback_to_the_model(self):
+        def boom(text, fields, opts, call_llm=None, k=3000):
+            raise RuntimeError("set GEMINI_API_KEY in the environment")
+        TA.run_skill = boom
+        layers, _, errors = TA.run_title_author("x" * 50, ["title", "author"],
+                                                TitleAuthorOptions(title_system="model", author_system="skill"), "cpu")
+        self.assertEqual(set(layers), {"title"})
+        self.assertEqual(set(errors), {"author"})
+        self.assertIn("GEMINI_API_KEY", errors["author"])
+        self.assertEqual([c[0] for c in self.calls], ["model"])                                      # the model was NOT asked for the author
+
+    def test_only_the_requested_fields_run(self):
+        opts = TitleAuthorOptions(title_system="model", author_system="skill")
+        layers, _, _ = TA.run_title_author("x" * 50, ["author"], opts, "cpu")
+        self.assertEqual(self.calls, [("skill", ("author",))])
+        self.assertEqual(set(layers), {"author"})
+
+    def test_invalid_choices_are_errors(self):
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(system="both", author_system="skill")        # both = side by side; cannot mix with a per-field choice
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(title_system="both")
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(system="nope")
+
+    def test_the_cost_note(self):
+        fields = ["title", "author"]
+        self.assertIsNone(TA.skill_note(TitleAuthorOptions(), fields, 100))                         # the free default prints nothing
+        note = TA.skill_note(TitleAuthorOptions(title_system="model", author_system="skill"), fields, 100)
+        self.assertIn("PAID", note)
+        self.assertIn("Rs 29.00", note)                                                             # 100 books x about 0.29
+        self.assertIn("author from the skill", note)
+        self.assertIsNone(TA.skill_note(TitleAuthorOptions(author_system="skill"), ["title"], 100))  # the skill is not used for a title-only run
+        self.assertIn("both systems", TA.skill_note(TitleAuthorOptions(system="both"), fields, 1))
+
+
+@needs_skill
+class SkillStubOneCall(unittest.TestCase):
+    def test_one_call_per_work_no_second_look_and_the_skills_title_is_ignored(self):
+        text = "༄༅། །བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ། ། རྒྱལ་བ་ཐམས་ཅད། །\n" * 3 + "རྩོམ་པ་པོ། དགེ་སློང་བློ་བཟང་གིས་སྦྱར།"
+        n = []
+
+        def stub(system, user):
+            n.append(1)
+            return json.dumps({"title": "བཀྲ་ཤིས་འཁྲུལ་པ་དཀར་པོ", "title_region": "head",
+                               "author": "དགེ་སློང་བློ་བཟང་", "author_region": "head"}, ensure_ascii=False)
+        opts = TitleAuthorOptions(title_system="model", author_system="skill", skill_dir=str(SKILL_DIR))
+        out = TA.run_skill(text, ["author"], opts, call_llm=stub)
+        self.assertEqual(len(n), 1)                                   # one LLM call, no second look
+        self.assertEqual(set(out), {"author"})                        # its title answer was ignored
+        a = out["author"][0]
+        self.assertEqual(text[a["start"]:a["end"]], "དགེ་སློང་བློ་བཟང་")
+        self.assertIn("review_reasons", a)
+
+
 class Config(unittest.TestCase):
     def test_layers(self):
         self.assertEqual((LAYERS["title"].kind, LAYERS["author"].kind), ("head_tail", "head_tail"))
         for name in ("tsawa", "sabche", "chapter", "quotation", "yigchung"):
             self.assertEqual(LAYERS[name].kind, "window")
-        self.assertEqual(LAYERS["title"].break_penalty, 12.0)
+        self.assertEqual((LAYERS["title"].break_penalty, LAYERS["title"].repo), (6.0, TITLE_MODEL))
+        self.assertEqual((LAYERS["author"].break_penalty, LAYERS["author"].repo), (6.0, AUTHOR_MODEL))
         self.assertEqual(base_layer("author_skill"), "author")
         self.assertEqual(base_layer("tsawa"), "tsawa")
 
     def test_defaults_are_free_and_local(self):
         o = TitleAuthorOptions()
-        self.assertEqual((o.system, o.title_model, o.author_model, o.opf), ("model", TITLE_AUTHOR_MODEL, TITLE_AUTHOR_MODEL, False))
+        self.assertEqual((o.system, o.title_model, o.author_model, o.opf), ("model", TITLE_MODEL, AUTHOR_MODEL, False))
+        self.assertEqual((TITLE_MODEL, AUTHOR_MODEL), ("Yontenn/mmbert-title-only", "Yontenn/mmbert-author-only"))
+        self.assertIsNone(o.break_penalty)                # per model: 6 single-entity, 12 joint
+        self.assertIsNone(o.strip_underscore)             # per model: single-entity models are trained on text without "_"
 
 
 class Stage3(unittest.TestCase):
