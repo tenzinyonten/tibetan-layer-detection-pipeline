@@ -71,6 +71,23 @@ def drop_non_tibetan_spans(layers: dict[str, list[dict]], text: str) -> tuple[di
     return kept, {n: len(layers[n]) - len(kept[n]) for n in layers}
 
 
+def drop_low_confidence(layers: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """For each layer whose LayerConfig.min_confidence is set (Sabche: 0.85), drop the spans whose
+    confidence is below it. Returns (layers, dropped spans per layer, each kept as it was). A span with no
+    confidence (a skill span) is never dropped, and layers without the option are untouched."""
+    out, dropped = {}, {}
+    for name, spans in layers.items():
+        cut = LAYERS[base_layer(name)].min_confidence if base_layer(name) in LAYERS else None
+        if cut is None:
+            out[name] = spans
+            continue
+        out[name] = [s for s in spans if s.get("confidence") is None or s["confidence"] >= cut]
+        gone = [s for s in spans if s.get("confidence") is not None and s["confidence"] < cut]
+        if gone:
+            dropped[name] = gone
+    return out, dropped
+
+
 # Drop a predicted tsawa span when this much of it sits inside a *predicted*
 # quotation span (Bo-Quotation-Detection). Never reads gold Quotation.yml /
 # Citation.yml -- incoming books are unannotated. If the quotation model
@@ -394,6 +411,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "layers/v001/ for plain .txt input, or layers/predicted/ for a real "
                          "OpenPecha book whose layers/v001/ already exists (only layers with spans); only for books "
                          "whose Stage 1 source_path matches <id>.opf/<id>.opf/base/v001.txt")
+    ap.add_argument("--keep-low-confidence", action="store_true",
+                    help="do not drop spans below a layer's min_confidence (Sabche: 0.85, see layer_config.py). "
+                         "Default: drop them and list them in the batch summary.")
     ap.add_argument("--keep-quoted-tsawa", action="store_true",
                     help="do not drop tsawa spans that mostly overlap a predicted "
                          "quotation span. Default: drop when coverage >= 0.5 and "
@@ -445,6 +465,12 @@ def main(argv=None) -> int:
         if any(dropped_non_tibetan.values()):
             print(f"  [note] {book_id}: dropped spans with no Tibetan text: "
                   f"{ {n: c for n, c in dropped_non_tibetan.items() if c} }", file=sys.stderr)
+        dropped_low_conf = {}
+        if not args.keep_low_confidence:
+            layers, dropped_low_conf = drop_low_confidence(layers)
+            if dropped_low_conf:
+                print(f"  [note] {book_id}: dropped spans below the layer's min confidence: "
+                      f"{ {n: len(v) for n, v in dropped_low_conf.items()} }", file=sys.stderr)
 
         if args.json:
             p = write_json(book_id, text_length, layers, errors, args.out, args.review_threshold,
@@ -488,6 +514,8 @@ def main(argv=None) -> int:
             "non_tibetan_spans_dropped_at_render": dropped_non_tibetan,
             "quoted_tsawa_dropped": len(dropped_quoted),
             "quoted_tsawa_dropped_spans": dropped_quoted,
+            "low_confidence_dropped": {n: len(v) for n, v in dropped_low_conf.items()},
+            "low_confidence_dropped_spans": dropped_low_conf,
             "errors": combined_errors,
         })
 
