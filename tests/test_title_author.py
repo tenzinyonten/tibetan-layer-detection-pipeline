@@ -198,6 +198,16 @@ class Decode(unittest.TestCase):
         self.assertEqual(t["system"], "model")
         self.assertGreater(t["confidence"], 0.99)
 
+    def test_author_span_first_or_last(self):
+        marks = {self.he + 5: 3, self.he + 6: 4, self.he + 50: 3, self.he + 51: 4, 0: 1, 1: 2, 20: 1, 21: 2}
+        lg = logits_for(self.seq, marks)
+        ts = self.seq["regions"][1][1]
+        last = TA.decode_fields(self.text, self.seq, lg, ID2LABEL, ["title", "author"])                       # the default
+        first = TA.decode_fields(self.text, self.seq, lg, ID2LABEL, ["title", "author"], author_span="first")
+        self.assertEqual(last["author"][0]["start"], ts + 50)
+        self.assertEqual(first["author"][0]["start"], ts + 5)
+        self.assertEqual(last["title"], first["title"])                                                          # the title is always the first span
+
     def test_nothing_found_gives_empty_lists(self):
         out = TA.decode_fields(self.text, self.seq, logits_for(self.seq, {}), ID2LABEL, ["title", "author"])
         self.assertEqual(out, {"title": [], "author": []})
@@ -249,7 +259,7 @@ class Systems(unittest.TestCase):
         return {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}
 
     def test_both_puts_the_answers_side_by_side_with_an_agreement_flag(self):
-        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None: {
+        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None, **kw: {
             "title": [self.span(0, 10, system="model")], "author": [self.span(50, 60, system="model")]}
         TA.run_skill = lambda text, fields, opts, call_llm=None, k=3000: {
             "title": [self.span(0, 12, system="skill", confidence=None)], "author": [self.span(200, 210, system="skill", confidence=None)]}
@@ -265,7 +275,7 @@ class Systems(unittest.TestCase):
         def boom(*a, **k):
             raise AssertionError("the skill must not be used in model mode")
         TA.run_skill = boom
-        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None: {f: [] for f in fields}
+        TA.run_model = lambda text, fields, repo, device, k=3000, bp=None, strip=None, **kw: {f: [] for f in fields}
         layers, _, errors = TA.run_title_author("x", ["title", "author"], TitleAuthorOptions(), "cpu")
         self.assertEqual((layers, errors), ({"title": [], "author": []}, {}))
 
@@ -276,7 +286,7 @@ class Systems(unittest.TestCase):
 
     def test_two_models_run_twice_one_model_runs_once(self):
         calls = []
-        def fake(text, fields, repo, device, k=3000, bp=None, strip=None):
+        def fake(text, fields, repo, device, k=3000, bp=None, strip=None, **kw):
             calls.append((repo, tuple(fields)))
             return {f: [] for f in fields}
         TA.run_model = fake
@@ -320,7 +330,7 @@ class PerFieldSystems(unittest.TestCase):
         self.calls = []
         span = lambda s, e, **kw: {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}  # noqa: E731
 
-        def fake_model(text, fields, repo, device, k=3000, bp=None, strip=None):
+        def fake_model(text, fields, repo, device, k=3000, bp=None, strip=None, **kw):
             self.calls.append(("model", repo, tuple(fields)))
             return {f: [span(0, 5, system="model")] for f in fields}
 
@@ -424,6 +434,9 @@ class Config(unittest.TestCase):
         self.assertEqual((o.system, o.title_model, o.author_model, o.opf), ("model", TITLE_MODEL, AUTHOR_MODEL, False))
         self.assertEqual((TITLE_MODEL, AUTHOR_MODEL), ("Yontenn/mmbert-title-only", "Yontenn/mmbert-author-only"))
         self.assertIsNone(o.break_penalty)                # per model: 6 single-entity, 12 joint
+        self.assertEqual(o.author_span, "last")                 # unchanged until the choice is made
+        with self.assertRaises(ValueError):
+            TitleAuthorOptions(author_span="middle")
         self.assertIsNone(o.strip_underscore)             # per model: single-entity models are trained on text without "_"
 
 

@@ -95,6 +95,9 @@ class TitleAuthorOptions:
     crop_chars: int = 3000                 # characters kept at each end
     break_penalty: float | None = None     # Viterbi. None: per model -- 6 for a single-entity model, 12 for the joint
     # one (both picked on validation); a number applies to every model alike
+    author_span: str = "last"              # which author span to keep when the model finds several: "last" (the default, the
+    # rule for a single work) or "first". On whole OpenPecha books the gold author is on the title page, and "first" matched it
+    # about twice as often as "last" (35% against 17% strict offsets, 511 books, mostly seen in training); see title_author.py.
     strip_underscore: bool | None = None   # remove "_" from the input before tokenizing. None: per model -- yes for a
     # single-entity model (trained on text without them), no for the joint one
     opf: bool = False                      # also write title/author as BookTitle.yml / Author.yml with --opf (off by default)
@@ -103,6 +106,8 @@ class TitleAuthorOptions:
     def __post_init__(self):
         if self.system not in ("model", "skill", "both"):
             raise ValueError(f"system must be model, skill or both, not {self.system!r}")
+        if self.author_span not in ("first", "last"):
+            raise ValueError(f"author_span must be first or last, not {self.author_span!r}")
         for name in ("title_system", "author_system"):
             v = getattr(self, name)
             if v not in (None, "model", "skill"):

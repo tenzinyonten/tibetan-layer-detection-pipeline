@@ -228,7 +228,8 @@ def default_break_penalty(id2label: dict[int, str]) -> float:
 
 
 def decode_fields(text: str, seq: dict, logits: np.ndarray, id2label: dict[int, str],
-                  fields: list[str], break_penalty: float | None = None) -> dict[str, list[dict]]:
+                  fields: list[str], break_penalty: float | None = None,
+                  author_span: str = "last") -> dict[str, list[dict]]:
     """logits: [len(input_ids), n_labels] for the whole sequence. Sets the special
     tokens aside, decodes, and returns {field: [span]} with at most one span per
     field (title = first span, author = last), as character offsets into `text`."""
@@ -246,7 +247,7 @@ def decode_fields(text: str, seq: dict, logits: np.ndarray, id2label: dict[int, 
         if not spans:
             out[f] = []
             continue
-        a, b = spans[-1] if f == "author" else spans[0]
+        a, b = spans[-1] if (f == "author" and author_span == "last") else spans[0]
         s, e = seq["offsets"][a][0], seq["offsets"][b][1]
         while s < e and text[s].isspace():  # a token carries the space before its word
             s += 1
@@ -300,7 +301,7 @@ def uses_stripped_text(id2label: dict[int, str]) -> bool:
 
 def run_model(text: str, fields: list[str], repo: str, device: str, k: int = 3000,
               break_penalty: float | None = None,
-              strip_underscore: bool | None = None) -> dict[str, list[dict]]:
+              strip_underscore: bool | None = None, author_span: str = "last") -> dict[str, list[dict]]:
     import torch
 
     tok, model = load_ta_model(repo, device)
@@ -310,7 +311,7 @@ def run_model(text: str, fields: list[str], repo: str, device: str, k: int = 300
     with torch.no_grad():
         x = torch.tensor([seq["input_ids"]], device=device)
         logits = model(input_ids=x).logits[0].float().cpu().numpy()
-    out = decode_fields(text, seq, logits, id2label, fields, break_penalty)
+    out = decode_fields(text, seq, logits, id2label, fields, break_penalty, author_span)
     for f in fields:
         for sp in out[f]:
             sp["model"] = repo
@@ -398,7 +399,8 @@ def run_title_author(text: str, fields: list[str], opts: TitleAuthorOptions, dev
         mine = [f for f in model_fields if model_of[f] == repo]
         t0 = time.time()
         try:
-            got = run_model(text, mine, repo, device, opts.crop_chars, opts.break_penalty, opts.strip_underscore)
+            got = run_model(text, mine, repo, device, opts.crop_chars, opts.break_penalty, opts.strip_underscore,
+                            author_span=opts.author_span)
         except Exception as e:
             for f in mine:
                 errors[f] = f"model load or inference failed: {e}"

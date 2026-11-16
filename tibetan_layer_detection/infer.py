@@ -339,6 +339,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "Default: follows --title-author-system, which defaults to model. "
                          "--title-system model --author-system skill scored best on the test split "
                          "(title 0.842, author 0.756); it is a fixed choice per field, not a rule per work.")
+    ap.add_argument("--author-span", choices=["last", "first"], default="last",
+                    help="which author span to keep when the author model finds several. Default last "
+                         "(the rule for a single work). For whole books the gold author is usually on the "
+                         "title page, and first matched it about twice as often (35% against 17%, 511 books).")
     ap.add_argument("--title-model", default=TITLE_MODEL,
                     help="Hugging Face repo (or local folder) of the model that finds the title. "
                          "Default: the title-only model (3 labels, Viterbi penalty 6). The joint "
@@ -393,6 +397,7 @@ def main(argv=None) -> int:
     try:
         ta_options = TitleAuthorOptions(
             system=args.title_author_system, title_system=args.title_system, author_system=args.author_system,
+            author_span=args.author_span,
             title_model=args.title_model, author_model=args.author_model,
             skill_model=args.title_author_skill_model, skill_dir=args.title_author_skill_dir)
     except ValueError as e:

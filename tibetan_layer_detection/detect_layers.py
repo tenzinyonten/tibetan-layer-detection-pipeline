@@ -53,6 +53,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="which system finds the title (default: follows --title-author-system, i.e. model)")
     ap.add_argument("--author-system", choices=["model", "skill"], default=None,
                     help="which system finds the author (PAID if skill; title model + author skill scored best)")
+    ap.add_argument("--author-span", choices=["last", "first"], default="last",
+                    help="which author span to keep when the author model finds several (default last; "
+                         "first suits whole books, where the author is on the title page)")
     ap.add_argument("--title-model", default=None, help="Hugging Face repo for the title model")
     ap.add_argument("--author-model", default=None, help="Hugging Face repo for the author model")
     ap.add_argument("--title-author-skill-model", default=None, help="LLM the skill calls (skill/both)")
@@ -96,7 +99,7 @@ def main(argv=None) -> int:
         infer_argv += ["--stride", str(args.stride)]
     if args.dual_window:
         infer_argv += ["--dual-window"]
-    infer_argv += ["--title-author-system", args.title_author_system]
+    infer_argv += ["--title-author-system", args.title_author_system, "--author-span", args.author_span]
     for flag, val in (("--title-system", args.title_system), ("--author-system", args.author_system),
                       ("--title-model", args.title_model), ("--author-model", args.author_model),
                       ("--title-author-skill-model", args.title_author_skill_model),
