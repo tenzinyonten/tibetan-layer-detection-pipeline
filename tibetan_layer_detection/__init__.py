@@ -61,8 +61,9 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         ANTHROPIC_API_KEY in the environment) or "both" (title/author from the
         model, title_skill/author_skill from the skill, side by side).
     title_model / author_model: Hugging Face repo (or local folder) per field;
-        default is Yontenn/mmbert-title-author-run2 for both (private; needs
-        HF_TOKEN or a stored login). title_author_skill_model / _skill_dir:
+        default is Yontenn/mmbert-title-only and Yontenn/mmbert-author-only
+        (private; each needs HF_TOKEN or a stored login; one forward pass per
+        model). The joint Yontenn/mmbert-title-author-run2 also works. title_author_skill_model / _skill_dir:
         which LLM, and where title_author_skill.py lives, for skill / both.
     title_author_opf: not implemented (the OpenPecha names are unknown); True
         raises an error. title_author_review_threshold: a confidence below this

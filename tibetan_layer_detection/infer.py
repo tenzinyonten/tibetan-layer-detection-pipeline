@@ -39,7 +39,7 @@ from .decode import (
     overlap_regions, softmax, span_confidences, spans_from_bio, spans_from_bioe,
     transition_matrix, viterbi, viterbi_bioe,
 )
-from .layer_config import LAYERS, TITLE_AUTHOR_MODEL, LayerConfig, TitleAuthorOptions
+from .layer_config import AUTHOR_MODEL, LAYERS, TITLE_MODEL, LayerConfig, TitleAuthorOptions
 from .windows import pack_window_for_inference, sliding_windows, special_token_ids
 
 CONTENT_MAX = 8190  # max_length 8192 - CLS - SEP, shared by every layer here
@@ -331,10 +331,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "the LLM skill (PAID: one LLM call per book; needs GEMINI_API_KEY or "
                          "ANTHROPIC_API_KEY), or both side by side (title/author from the model, "
                          "title_skill/author_skill from the skill, no rule choosing between them).")
-    ap.add_argument("--title-model", default=TITLE_AUTHOR_MODEL,
-                    help="Hugging Face repo (or local folder) of the model that finds the title")
-    ap.add_argument("--author-model", default=TITLE_AUTHOR_MODEL,
-                    help="Hugging Face repo (or local folder) of the model that finds the author")
+    ap.add_argument("--title-model", default=TITLE_MODEL,
+                    help="Hugging Face repo (or local folder) of the model that finds the title. "
+                         "Default: the title-only model (3 labels, Viterbi penalty 6). The joint "
+                         "Yontenn/mmbert-title-author-run2 also works (penalty 12).")
+    ap.add_argument("--author-model", default=AUTHOR_MODEL,
+                    help="Hugging Face repo (or local folder) of the model that finds the author. "
+                         "Default: the author-only model. If --title-model and --author-model are the "
+                         "same joint model, one forward pass serves both fields.")
     ap.add_argument("--title-author-skill-model", default=TitleAuthorOptions.skill_model,
                     help="LLM the skill calls when --title-author-system is skill or both")
     ap.add_argument("--title-author-skill-dir", default=None,
