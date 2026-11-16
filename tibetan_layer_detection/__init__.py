@@ -72,8 +72,9 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         (private; each needs HF_TOKEN or a stored login; one forward pass per
         model). The joint Yontenn/mmbert-title-author-run2 also works. title_author_skill_model / _skill_dir:
         which LLM, and where title_author_skill.py lives, for skill / both.
-    title_author_opf: not implemented (the OpenPecha names are unknown); True
-        raises an error. title_author_review_threshold: a confidence below this
+    title_author_opf: with write_opf, also write title and author as the
+        OpenPecha layers BookTitle.yml and Author.yml (off by default); needs
+        write_opf. title_author_review_threshold: a confidence below this
         flags a title/author span review_needed (default: review_threshold).
     write_json / write_html / write_opf: also persist Stage 3's JSON/HTML/
         .opf files under out_dir (see the tibetan-postprocess console

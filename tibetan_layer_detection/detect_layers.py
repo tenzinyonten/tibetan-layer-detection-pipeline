@@ -57,7 +57,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--author-model", default=None, help="Hugging Face repo for the author model")
     ap.add_argument("--title-author-skill-model", default=None, help="LLM the skill calls (skill/both)")
     ap.add_argument("--title-author-skill-dir", default=None, help="folder holding title_author_skill.py")
-    ap.add_argument("--title-author-opf", action="store_true", help="NOT IMPLEMENTED (an error if on)")
+    ap.add_argument("--title-author-opf", action="store_true",
+                    help="with --opf, also write title and author as BookTitle.yml / Author.yml (off by default)")
     ap.add_argument("--title-author-review-threshold", type=float, default=None,
                     help="flag a title/author span review_needed below this confidence")
     ap.add_argument("--review-threshold", type=float, default=None,

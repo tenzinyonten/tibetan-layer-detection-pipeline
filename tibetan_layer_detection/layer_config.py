@@ -66,6 +66,11 @@ TA_FIELDS = ("title", "author")
 TA_LAYER_NAMES = TA_FIELDS + tuple(f + "_skill" for f in TA_FIELDS)  # the _skill ones appear with system "both"
 
 
+# The OpenPecha layer files for these two, as they are named in the real books (data/raw_opf: BookTitle.yml in
+# 527 of 539 books, Author.yml in 516). Only the plain names are ever written, never the *_skill ones.
+OPF_LAYER_NAMES = {"title": "BookTitle", "author": "Author"}
+
+
 def is_title_author(name: str) -> bool:
     return name in TA_LAYER_NAMES
 
@@ -92,7 +97,7 @@ class TitleAuthorOptions:
     # one (both picked on validation); a number applies to every model alike
     strip_underscore: bool | None = None   # remove "_" from the input before tokenizing. None: per model -- yes for a
     # single-entity model (trained on text without them), no for the joint one
-    opf: bool = False                      # .opf output for title/author: not implemented, raises if switched on
+    opf: bool = False                      # also write title/author as BookTitle.yml / Author.yml with --opf (off by default)
     review_threshold: float | None = None  # None: the global review threshold (--review-threshold, 0.7)
 
     def __post_init__(self):

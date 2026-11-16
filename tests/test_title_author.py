@@ -458,13 +458,13 @@ class Stage3(unittest.TestCase):
                          (None, "tail", "skill", ["author was weak"], False))
         self.assertTrue(out["review_needed"])
 
-    def test_opf_for_title_author_is_a_clear_error(self):
+    def test_title_author_opf_needs_opf(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(SystemExit) as cm:
                 P.main(["--input", d, "--source", d, "--out", d, "--title-author-opf"])
-        self.assertIn("not implemented", str(cm.exception))
+        self.assertIn("--opf", str(cm.exception))
 
-    def test_opf_output_skips_title_author(self):
+    def _run_opf(self, *extra):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             (d / "pre").mkdir(); (d / "pred").mkdir()
@@ -473,14 +473,35 @@ class Stage3(unittest.TestCase):
             txt.write_text(body, encoding="utf-8")
             (d / "pre" / "b.json").write_text(json.dumps(
                 {"book_id": "b", "text": body, "char_count": len(body), "source_path": str(txt)}), encoding="utf-8")
-            span = lambda s, e: {"start": s, "end": e, "confidence": 0.9, "window_votes": 1}  # noqa: E731
+            span = lambda s, e, **kw: {"start": s, "end": e, "confidence": 0.9, "window_votes": 1, **kw}  # noqa: E731
             (d / "pred" / "b.json").write_text(json.dumps({"book_id": "b", "layers": {
-                "sabche": [span(0, 40)], "title": [span(0, 9)], "author": [span(50, 58)]}}), encoding="utf-8")
-            P.main(["--input", str(d / "pred"), "--source", str(d / "pre"), "--out", str(d / "out"), "--json", "--opf"])
-            names = sorted(p.name for p in (d / "out").rglob("*.yml"))
-            self.assertEqual(names, ["Sabche.yml"])
+                "sabche": [span(0, 40)], "title": [span(0, 9)], "author": [span(50, 58)],
+                "author_skill": [span(50, 58, confidence=None)]}}), encoding="utf-8")
+            P.main(["--input", str(d / "pred"), "--source", str(d / "pre"), "--out", str(d / "out"), "--json", "--opf", *extra])
+            import yaml
+            files = {p.name: yaml.safe_load(p.read_text(encoding="utf-8")) for p in (d / "out").rglob("*.yml")}
             res = json.loads((d / "out" / "b.json").read_text(encoding="utf-8"))
-            self.assertEqual({k: len(v) for k, v in res["layers"].items()}, {"sabche": 1, "title": 1, "author": 1})
+        return files, res
+
+    def test_opf_output_skips_title_author_by_default(self):
+        files, res = self._run_opf()
+        self.assertEqual(sorted(files), ["Sabche.yml"])
+        self.assertEqual({k: len(v) for k, v in res["layers"].items()}, {"sabche": 1, "title": 1, "author": 1, "author_skill": 1})
+
+    def test_opf_output_with_title_author_uses_the_openpecha_names(self):
+        files, _ = self._run_opf("--title-author-opf")
+        self.assertEqual(sorted(files), ["Author.yml", "BookTitle.yml", "Sabche.yml"])      # never Title.yml or a _skill file
+        self.assertEqual(files["BookTitle.yml"]["annotation_type"], "BookTitle")
+        self.assertEqual(files["Author.yml"]["annotation_type"], "Author")
+        (ann,) = files["BookTitle.yml"]["annotations"].values()
+        self.assertEqual(ann, {"span": {"start": 0, "end": 9}})
+        (ann,) = files["Author.yml"]["annotations"].values()
+        self.assertEqual(ann, {"span": {"start": 50, "end": 58}})                          # the same shape as the other layers
+
+    def test_opf_layer_selection(self):
+        layers = {"tsawa": [1], "title": [1], "author": [1], "title_skill": [1], "author_skill": [1]}
+        self.assertEqual(set(P.opf_layers_to_write(layers, False)), {"tsawa"})
+        self.assertEqual(set(P.opf_layers_to_write(layers, True)), {"tsawa", "title", "author"})
 
 
 TA_DATA = Path(os.environ.get("TA_DATA", ROOT / "title_author/data/processed"))  # not in this repo: set TA_DATA

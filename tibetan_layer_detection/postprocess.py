@@ -44,7 +44,7 @@ from pathlib import Path
 import yaml
 
 from .decode import has_tibetan
-from .layer_config import LAYERS, base_layer, is_title_author
+from .layer_config import LAYERS, OPF_LAYER_NAMES, base_layer, is_title_author
 
 # Spans under this many characters are dropped from every output (JSON, HTML,
 # .opf) for all layers. On the Sabche test set the 19 predicted spans of 1-4
@@ -271,6 +271,13 @@ def write_plain_opf(book_id: str, text: str, out_dir: Path) -> Path:
     return root
 
 
+def opf_layers_to_write(layers: dict[str, list[dict]], include_title_author: bool) -> dict[str, list[dict]]:
+    """The layers that go to .opf: every layer except title/author, which are added (as the plain
+    title and author, never the *_skill ones) only when include_title_author is set."""
+    return {n: sp for n, sp in layers.items()
+            if not is_title_author(n) or (include_title_author and n in OPF_LAYER_NAMES)}
+
+
 def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path,
                      subdir: str = "v001") -> list[Path]:
     """Write predictions as OpenPecha-shaped layer YAML under
@@ -283,7 +290,7 @@ def write_opf_layers(layers: dict[str, list[dict]], opf_root: Path,
     for name, spans in layers.items():
         if not spans:
             continue
-        layer_name = name.capitalize()
+        layer_name = OPF_LAYER_NAMES.get(name, name.capitalize())
         data = {
             "id": uuid.uuid4().hex,
             "annotation_type": layer_name,
@@ -395,8 +402,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="a title/author span with confidence below this is flagged review_needed "
                          "(wins over --review-threshold for those layers). Default: --review-threshold.")
     ap.add_argument("--title-author-opf", action="store_true",
-                    help="NOT IMPLEMENTED: writing title/author as OpenPecha layers (the layer names are not "
-                         "known). Switching it on is an error; --opf alone skips these layers.")
+                    help="with --opf, also write title and author as the OpenPecha layers BookTitle.yml and "
+                         "Author.yml (the names the real books use). Off by default: --opf alone writes the "
+                         "other layers only.")
     ap.add_argument("--review-threshold", type=float, default=0.7,
                     help="a span with confidence below this is flagged review_needed")
     return ap.parse_args(argv)
@@ -404,9 +412,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    if args.title_author_opf:
-        raise SystemExit("--title-author-opf is not implemented: the OpenPecha layer names for title and "
-                         "author are not known. Leave it off; --opf writes the other layers only.")
+    if args.title_author_opf and not args.opf:
+        raise SystemExit("--title-author-opf only adds title/author to the .opf output: pass --opf as well")
     files = sorted(args.input.glob("*.json"))
     if not files:
         raise SystemExit(f"no predictions JSON files found in {args.input}")
@@ -450,9 +457,9 @@ def main(argv=None) -> int:
             source_path = Path(preprocessed["source_path"])
             root = opf_root_for(source_path)
             plain = root is None
-            opf_layers = {n: sp for n, sp in layers.items() if not is_title_author(n)}
-            if any(is_title_author(n) and sp for n, sp in layers.items()):
-                print(f"  [note] {book_id}: title/author are not written to .opf (not implemented)", file=sys.stderr)
+            opf_layers = opf_layers_to_write(layers, args.title_author_opf)
+            if not args.title_author_opf and any(is_title_author(n) and sp for n, sp in layers.items()):
+                print(f"  [note] {book_id}: title/author are not written to .opf (add --title-author-opf)", file=sys.stderr)
             if plain:
                 if source_path.is_file():
                     norm_text, src = normalize_tsegs_tracked(text)
