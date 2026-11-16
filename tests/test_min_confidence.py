@@ -29,7 +29,7 @@ class MinConfidence(unittest.TestCase):
         self.assertEqual([s["confidence"] for s in dropped["sabche"]], [0.8499, 0.2])
 
     def test_other_layers_and_title_author_are_untouched(self):
-        layers = {"tsawa": [sp(0.1)], "chapter": [sp(0.1)], "title": [sp(0.1)], "author_skill": [sp(None)]}
+        layers = {"tsawa": [sp(0.1)], "chapter": [sp(0.1)], "title": [sp(0.1)], "author": [sp(0.1)]}
         out, dropped = P.drop_low_confidence(layers)
         self.assertEqual(out, layers)
         self.assertEqual(dropped, {})

@@ -44,7 +44,7 @@ from pathlib import Path
 import yaml
 
 from .decode import has_tibetan
-from .layer_config import LAYERS, OPF_LAYER_NAMES, base_layer, is_title_author
+from .layer_config import LAYERS, OPF_LAYER_NAMES, is_title_author
 
 # Spans under this many characters are dropped from every output (JSON, HTML,
 # .opf) for all layers. On the Sabche test set the 19 predicted spans of 1-4
@@ -74,10 +74,10 @@ def drop_non_tibetan_spans(layers: dict[str, list[dict]], text: str) -> tuple[di
 def drop_low_confidence(layers: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
     """For each layer whose LayerConfig.min_confidence is set (Sabche: 0.85), drop the spans whose
     confidence is below it. Returns (layers, dropped spans per layer, each kept as it was). A span with no
-    confidence (a skill span) is never dropped, and layers without the option are untouched."""
+    confidence is never dropped, and layers without the option are untouched."""
     out, dropped = {}, {}
     for name, spans in layers.items():
-        cut = LAYERS[base_layer(name)].min_confidence if base_layer(name) in LAYERS else None
+        cut = LAYERS[name].min_confidence if name in LAYERS else None
         if cut is None:
             out[name] = spans
             continue
@@ -180,8 +180,8 @@ def threshold_for(layer_name: str, review_threshold: float, ta_threshold: float 
 
 
 def needs_review(s: dict, name: str, review_threshold: float, ta_threshold: float | None = None) -> bool:
-    """A span is flagged when its confidence is below the threshold. A skill span
-    has no confidence: the skill's own checks (review_needed from Stage 2) decide."""
+    """A span is flagged when its confidence is below the threshold. A span with
+    no confidence is flagged only if it carries review_needed itself."""
     if s.get("confidence") is None:
         return bool(s.get("review_needed"))
     return s["confidence"] < threshold_for(name, review_threshold, ta_threshold)
@@ -190,7 +190,7 @@ def needs_review(s: dict, name: str, review_threshold: float, ta_threshold: floa
 def _span_payload(s: dict, name: str, review_threshold: float, ta_threshold: float | None = None) -> dict:
     out = {"start": s["start"], "end": s["end"],
            "confidence": None if s["confidence"] is None else round(s["confidence"], 4)}
-    for key in ("block", "system", "model", "review_reasons", "systems_agree"):  # title/author extras
+    for key in ("block", "model"):  # title/author extras
         if key in s:
             out[key] = s[key]
     out["review_needed"] = needs_review(s, name, review_threshold, ta_threshold)
@@ -289,8 +289,8 @@ def write_plain_opf(book_id: str, text: str, out_dir: Path) -> Path:
 
 
 def opf_layers_to_write(layers: dict[str, list[dict]], include_title_author: bool) -> dict[str, list[dict]]:
-    """The layers that go to .opf: every layer except title/author, which are added (as the plain
-    title and author, never the *_skill ones) only when include_title_author is set."""
+    """The layers that go to .opf: every layer except title/author, which are added (as the
+    title and author) only when include_title_author is set."""
     return {n: sp for n, sp in layers.items()
             if not is_title_author(n) or (include_title_author and n in OPF_LAYER_NAMES)}
 
@@ -357,7 +357,7 @@ def write_html(book_id: str, text: str, layers: dict[str, list[dict]],
         if not chunk:
             continue
         if active:
-            shadows = ", ".join(f"inset 0 -{2 + 2 * i}px {LAYERS[base_layer(n)].color}"
+            shadows = ", ".join(f"inset 0 -{2 + 2 * i}px {LAYERS[n].color}"
                                 for i, n in enumerate(sorted(active)))
             title = ", ".join(sorted(active))
             parts.append(f'<span class="span" style="box-shadow:{shadows}" title="{title}">{chunk}</span>')
@@ -367,7 +367,7 @@ def write_html(book_id: str, text: str, layers: dict[str, list[dict]],
 
     counts = {name: len(spans) for name, spans in layers.items()}
     legend = "".join(
-        f'<div class="legend-row"><span class="swatch" style="background:{LAYERS[base_layer(n)].color}"></span>'
+        f'<div class="legend-row"><span class="swatch" style="background:{LAYERS[n].color}"></span>'
         f'{n} <span class="mut">({counts.get(n, 0)} spans'
         + (f", {errors[n]}" if n in errors else "")
         + ')</span></div>'

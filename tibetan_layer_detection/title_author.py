@@ -23,13 +23,10 @@ snap_forward / snap_backward). One difference is unavoidable: training also
 moved a crop edge that would have cut a gold span; at inference there is no
 gold, so the edge stays where the snap puts it.
 
-A second system, the LLM skill in title_author/skills/tibetan-title-author/, can
-be used instead of, or next to, the model (TitleAuthorOptions.system). It is
-imported only then, and it costs a paid LLM call per work.
+Title and author come from the trained models only. There is no LLM or paid path.
 
-Nothing here reads a token or key from a file: Hugging Face access uses the
-HF_TOKEN environment variable (or the stored `huggingface-cli login`), and the
-skill's keys are GEMINI_API_KEY / ANTHROPIC_API_KEY.
+Nothing here reads a token from a file: Hugging Face access uses the
+HF_TOKEN environment variable (or the stored `huggingface-cli login`).
 """
 
 from __future__ import annotations
@@ -49,9 +46,6 @@ SINGLE_BREAK_PENALTY = 6.0   # a single-entity (3-label) model, picked on valida
 BASE_TOKENIZER = "jhu-clsp/mmBERT-base"  # the tokenizer the training data was built with
 MAX_SEQUENCE = 8192                      # the model's window; head + tail is about 4,100 tokens
 SNAP_LIMIT = 600                         # how far a crop edge may move to reach a line start
-
-SKILL_SUBDIR = "title_author/skills/tibetan-title-author/scripts"
-SKILL_COST_INR_PER_WORK = 0.29  # about, at the batch price; live calls cost more
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +247,7 @@ def decode_fields(text: str, seq: dict, logits: np.ndarray, id2label: dict[int, 
             s += 1
         conf = span_confidences(probs, path, [(a, b)])[0]
         block = "whole" if head_end is None else ("head" if s < head_end else "tail")
-        out[f] = [{"start": s, "end": e, "confidence": conf, "window_votes": 1, "block": block,
-                   "system": "model"}]
+        out[f] = [{"start": s, "end": e, "confidence": conf, "window_votes": 1, "block": block}]
     return out
 
 
@@ -319,84 +312,20 @@ def run_model(text: str, fields: list[str], repo: str, device: str, k: int = 300
 
 
 # ---------------------------------------------------------------------------
-# the skill (optional, paid)
+# all requested fields
 # ---------------------------------------------------------------------------
 
-def _skill_modules(skill_dir: str | None):
-    """Import the skill lazily; it is never loaded in model-only runs."""
-    d = Path(skill_dir or os.environ.get("TA_SKILL_DIR") or Path(__file__).resolve().parents[1] / SKILL_SUBDIR)
-    if not (d / "title_author_skill.py").is_file():
-        raise RuntimeError(f"title/author skill not found in {d}; set TA_SKILL_DIR or --title-author-skill-dir")
-    if str(d) not in sys.path:
-        sys.path.insert(0, str(d))
-    import title_author_skill as S  # noqa: E402
-    return S
-
-
-def run_skill(text: str, fields: list[str], opts: TitleAuthorOptions, call_llm=None,
-              k: int = 3000) -> dict[str, list[dict]]:
-    """Ask the skill for the title and author of this work and locate its answers
-    in `text`. The skill receives the same crop as the model. It returns strings
-    plus a region; the title is found at its first occurrence in that block and
-    the author at its last. Spans carry review_needed / review_reasons from the
-    skill's own flags and no confidence."""
-    S = _skill_modules(opts.skill_dir)
-    regions = crop_regions(text, k)
-    if len(regions) == 1:
-        head, tail, whole = text, "", True
-    else:
-        head, tail, whole = text[regions[0][1]:regions[0][2]], text[regions[1][1]:regions[1][2]], False
-    nh, nt, nw = S.normalize_input(head, tail, whole)  # the skill trims each block to 3,000 characters
-    tail_base = (regions[1][1] + len(tail) - len(nt)) if tail else (len(head) - len(nt))
-    call = call_llm if call_llm is not None else S.llm_for(opts.skill_model)
-    ans = S.extract(head, tail, whole, call_llm=call)
-    out: dict[str, list[dict]] = {f: [] for f in fields}
-    for f in fields:
-        val, region = ans.get(f), ans.get(f + "_region")
-        if not val:
-            continue
-        block, base = (nh, 0) if (region == "head" or nw) else (nt, tail_base)
-        i = block.rfind(val) if f == "author" else block.find(val)
-        if i < 0:
-            continue
-        out[f] = [{"start": base + i, "end": base + i + len(val), "confidence": None, "window_votes": 1,
-                   "block": "whole" if len(regions) == 1 else ("head" if base == 0 else "tail"),
-                   "system": "skill", "review_needed": bool(ans.get("needs_review")),
-                   "review_reasons": list(ans.get("review_reasons") or [])}]
-    return out
-
-
-# ---------------------------------------------------------------------------
-# the two systems together
-# ---------------------------------------------------------------------------
-
-def _iou(a: dict, b: dict) -> float:
-    inter = max(0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
-    union = (a["end"] - a["start"]) + (b["end"] - b["start"]) - inter
-    return inter / union if union else 0.0
-
-
-def run_title_author(text: str, fields: list[str], opts: TitleAuthorOptions, device: str,
-                     call_llm=None) -> tuple[dict[str, list[dict]], dict[str, float], dict[str, str]]:
+def run_title_author(text: str, fields: list[str], opts: TitleAuthorOptions, device: str
+                     ) -> tuple[dict[str, list[dict]], dict[str, float], dict[str, str]]:
     """Returns (layers, elapsed_s, errors). `fields` is a subset of ("title", "author").
-    Each field is answered by ONE system, chosen per field (opts.title_system /
-    opts.author_system, else opts.system): "model" is the trained model, "skill" the
-    LLM skill (its answer for the other field is ignored). The choice is fixed, not
-    a rule per work, and a skill failure is an error for that field, not a silent
-    fallback to the model. Spans come back under the plain names, with "system" set.
-    opts.system "both" instead runs both systems for every field: layers[field] from
-    the model and layers[field + "_skill"] from the skill, side by side; each span
-    gets systems_agree (IoU >= 0.5 between the two, the benchmark's own rule)."""
+    The trained model of each field runs once per distinct model (a joint model that
+    serves both fields needs one forward pass). A failure is an error for that field."""
     layers: dict[str, list[dict]] = {}
     elapsed: dict[str, float] = {}
     errors: dict[str, str] = {}
     model_of = {"title": opts.title_model, "author": opts.author_model}
-    both = opts.side_by_side
-    model_fields = [f for f in fields if both or opts.field_system(f) == "model"]
-    skill_fields = [f for f in fields if both or opts.field_system(f) == "skill"]
-    result: dict[str, dict[str, list[dict]]] = {}
-    for repo in dict.fromkeys(model_of[f] for f in model_fields):  # one forward pass per distinct model
-        mine = [f for f in model_fields if model_of[f] == repo]
+    for repo in dict.fromkeys(model_of[f] for f in fields):  # one forward pass per distinct model
+        mine = [f for f in fields if model_of[f] == repo]
         t0 = time.time()
         try:
             got = run_model(text, mine, repo, device, opts.crop_chars, opts.break_penalty, opts.strip_underscore,
@@ -409,36 +338,4 @@ def run_title_author(text: str, fields: list[str], opts: TitleAuthorOptions, dev
         for f in mine:
             layers[f] = got[f]
             elapsed[f] = round(time.time() - t0, 2)
-    if model_fields:
-        result["model"] = {f: layers.get(f, []) for f in model_fields}
-    if skill_fields:
-        name = (lambda f: f + "_skill") if both else (lambda f: f)
-        t0 = time.time()
-        try:
-            got = run_skill(text, skill_fields, opts, call_llm, opts.crop_chars)
-        except Exception as e:
-            for f in skill_fields:
-                errors[name(f)] = f"skill failed: {e}"
-            print(f"  [warn] title/author skill failed: {e}", file=sys.stderr)
-        else:
-            for f in skill_fields:
-                layers[name(f)] = got[f]
-                elapsed[name(f)] = round(time.time() - t0, 2)
-            result["skill"] = got
-    if both and "model" in result and "skill" in result:
-        for f in fields:
-            m, s = result["model"].get(f, []), result["skill"].get(f, [])
-            agree = bool(m and s and _iou(m[0], s[0]) >= 0.5)
-            for sp in m + s:
-                sp["systems_agree"] = agree
     return layers, elapsed, errors
-
-
-def skill_note(opts: TitleAuthorOptions, fields: list[str], n_books: int) -> str | None:
-    """The line printed before a run that will make paid LLM calls, or None if it will not."""
-    if not any(opts.side_by_side or opts.field_system(f) == "skill" for f in fields):
-        return None
-    which = "both systems" if opts.side_by_side else ", ".join(f"{f} from the {opts.field_system(f)}" for f in fields)
-    return (f"title/author skill: one PAID LLM call ({opts.skill_model}) per book ({which}); {n_books} book(s) = "
-            f"about Rs {SKILL_COST_INR_PER_WORK * n_books:.2f} at the batch price (live calls cost more). "
-            f"No keys are stored; they come from the environment.")
