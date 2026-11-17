@@ -101,6 +101,14 @@ export HF_TOKEN=your_token_here   # needed for the private models
 docker-compose up
 ```
 
+This runs on CPU. To run the worker on an NVIDIA GPU, add the GPU override
+(builds torch with CUDA 12.4 and gives the worker the GPU; needs an NVIDIA
+driver and the NVIDIA Container Toolkit on the host):
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
 Books are read from `./data/` on the host (bind-mounted read-only into the
 worker container at `/data`); `book_path` in a request is resolved relative
 to that folder.
