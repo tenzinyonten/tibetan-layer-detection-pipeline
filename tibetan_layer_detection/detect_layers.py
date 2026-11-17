@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import infer, postprocess, preprocess
+from . import infer, postprocess, preprocess, stage_args
 from .layer_config import LAYERS
 
 
@@ -83,34 +83,17 @@ def main(argv=None) -> int:
     preprocess.main(["--input", str(args.text or args.dir), "--out", str(pre_dir)])
 
     print(f"\n{'='*60}\nSTAGE 2: infer\n{'='*60}")
-    infer_argv = ["--input", str(pre_dir), "--out", str(pred_dir)]
-    infer_argv += ["--all"] if args.all else ["--layers", *args.layers]
-    if args.device:
-        infer_argv += ["--device", args.device]
-    if args.stride is not None:
-        infer_argv += ["--stride", str(args.stride)]
-    if args.dual_window:
-        infer_argv += ["--dual-window"]
-    infer_argv += ["--author-span", args.author_span]
-    for flag, val in (("--title-model", args.title_model), ("--author-model", args.author_model)):
-        if val:
-            infer_argv += [flag, str(val)]
+    infer_argv = stage_args.infer_args(
+        pre_dir, pred_dir, layers=args.layers, all_layers=args.all, device=args.device, stride=args.stride,
+        dual_window=args.dual_window, author_span=args.author_span,
+        title_model=args.title_model, author_model=args.author_model)
     infer.main(infer_argv)
 
     print(f"\n{'='*60}\nSTAGE 3: postprocess\n{'='*60}")
-    post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(out_dir)]
-    if args.review_threshold is not None:
-        post_argv += ["--review-threshold", str(args.review_threshold)]
-    if args.title_author_review_threshold is not None:
-        post_argv += ["--title-author-review-threshold", str(args.title_author_review_threshold)]
-    if args.title_author_opf:
-        post_argv.append("--title-author-opf")
-    if args.json:
-        post_argv.append("--json")
-    if args.html:
-        post_argv.append("--html")
-    if args.opf:
-        post_argv.append("--opf")
+    post_argv = stage_args.postprocess_args(
+        pred_dir, pre_dir, out_dir, review_threshold=args.review_threshold,
+        title_author_review_threshold=args.title_author_review_threshold,
+        title_author_opf=args.title_author_opf, json=args.json, html=args.html, opf=args.opf)
     postprocess.main(post_argv)
     return 0
 

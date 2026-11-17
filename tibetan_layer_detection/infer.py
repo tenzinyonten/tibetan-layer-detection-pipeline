@@ -37,7 +37,7 @@ import numpy as np
 from .decode import (
     MIN_SPAN_CHARS, apply_linguistic_rules, merge_dual_window, merge_spans_with_votes,
     overlap_regions, softmax, span_confidences, spans_from_bio, spans_from_bioe,
-    transition_matrix, viterbi, viterbi_bioe,
+    viterbi, viterbi_bioe,
 )
 from .layer_config import AUTHOR_MODEL, LAYERS, TITLE_MODEL, LayerConfig, TitleAuthorOptions
 from .windows import pack_window_for_inference, sliding_windows, special_token_ids
