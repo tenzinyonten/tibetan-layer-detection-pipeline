@@ -21,6 +21,11 @@ Usage (as an installed console script)
 ---------------------------------------
     tibetan-infer --input preprocessed/ --out predictions/ --all
     tibetan-infer --input preprocessed/ --out predictions/ --layers tsawa sabche --device cuda
+    tibetan-infer --input preprocessed/ --out predictions/ --all --workers 3   # 3 books at a time
+
+--workers N runs N books at the same time, each in its own process. Every process loads its
+own copy of the models (about 5.5 GB of RAM for all seven layers), so N books need about
+N x 5.5 GB. The default, 1, is the plain one-book-at-a-time loop.
 """
 
 from __future__ import annotations
@@ -63,8 +68,33 @@ def _window_logits(text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_
     return logits[1:1 + n_content], content_off
 
 
+def _tokenizer_key(tok) -> str:
+    """A fingerprint of the whole tokenizer (vocabulary, rules and special tokens). Two tokenizers
+    with the same key tokenize every text identically, so one layer's tokens can serve another."""
+    key = _TOKENIZER_KEYS.get(id(tok))
+    if key is None:
+        import hashlib
+        key = hashlib.sha1(tok.backend_tokenizer.to_str().encode("utf-8")).hexdigest()
+        _TOKENIZER_KEYS[id(tok)] = key
+    return key
+
+
+_TOKENIZER_KEYS: dict[int, str] = {}  # id(tokenizer) -> key; tokenizers live as long as the process (_MODEL_CACHE)
+
+
+def encode_text(text: str, tok, cache: dict | None = None):
+    """Tokenize `text` with ids and character offsets. With a `cache` (one per book), a layer whose
+    tokenizer is identical to one already used on this text reuses the result instead of tokenizing again."""
+    if cache is None:
+        return tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    key = _tokenizer_key(tok)
+    if key not in cache:
+        cache[key] = tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    return cache[key]
+
+
 def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
-             stride: int | None = None, content_max: int = CONTENT_MAX,
+             stride: int | None = None, content_max: int = CONTENT_MAX, enc=None,
              ) -> tuple[list[tuple[int, int, float, int]], int]:
     """Returns (character spans as (start, end, confidence, window_votes)
     4-tuples, number of windows run).
@@ -74,6 +104,7 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
         sabche/chapter at 5120, quotation at 3613, yigchung at 4914 -- so
         omitting --stride is unchanged from before this option existed.
     content_max: window content size in tokens (CLS/SEP are added on top).
+    enc: the text already tokenized with this layer's tokenizer (see encode_text); None tokenizes here.
         Defaults to the shared CONTENT_MAX every layer trained at; passed
         smaller by run_layer_dual's half-size pass (--dual-window).
 
@@ -95,7 +126,8 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
 
     eff_stride = cfg.stride if stride is None else stride
     max_length = content_max + 2  # + CLS + SEP
-    enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    if enc is None:
+        enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
     input_ids = enc["input_ids"]
     offsets = [tuple(o) for o in enc["offset_mapping"]]
     cls_id, sep_id, pad_id = special_token_ids(tok)
@@ -173,7 +205,7 @@ def rule_flags(cfg: LayerConfig) -> dict:
 
 
 def run_layer_dual(text: str, tok, model, cfg: LayerConfig, device: str,
-                   stride: int | None = None,
+                   stride: int | None = None, enc=None,
                    ) -> tuple[list[tuple[int, int, float, int, str]], int, int]:
     """--dual-window: runs the layer twice, once at the normal (possibly
     --stride-overridden) window size and once at half window size / half
@@ -182,13 +214,15 @@ def run_layer_dual(text: str, tok, model, cfg: LayerConfig, device: str,
     trailing dual_window_agreement string, total windows run across both
     passes, total short spans removed across both passes)."""
     full_stride = cfg.stride if stride is None else stride
+    if enc is None:
+        enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)  # once for both passes
     full_spans, n_full = run_layer(text, tok, model, cfg, device, stride=full_stride,
-                                   content_max=CONTENT_MAX)
+                                   content_max=CONTENT_MAX, enc=enc)
     full_spans, n_removed_full = apply_linguistic_rules(full_spans, text, **rule_flags(cfg))
 
     half_stride = max(1, full_stride // 2)
     half_spans, n_half = run_layer(text, tok, model, cfg, device, stride=half_stride,
-                                   content_max=CONTENT_MAX // 2)
+                                   content_max=CONTENT_MAX // 2, enc=enc)
     half_spans, n_removed_half = apply_linguistic_rules(half_spans, text, **rule_flags(cfg))
 
     merged = merge_dual_window(full_spans, half_spans)
@@ -268,6 +302,7 @@ def infer_one(book: dict, layer_names: list[str], device: str,
     elapsed_s: dict[str, float] = {}
     short_spans_removed: dict[str, int] = {}
     errors: dict[str, str] = {}
+    enc_cache: dict = {}  # this book's tokens, shared by every layer with an identical tokenizer
     for name in layer_names:
         if LAYERS[name].kind == "head_tail":
             continue  # title/author: handled together below, one forward pass for both fields
@@ -279,14 +314,15 @@ def infer_one(book: dict, layer_names: list[str], device: str,
             print(f"  [warn] {book_id}: layer '{name}' skipped: {e}", file=sys.stderr)
             continue
         try:
+            enc = encode_text(text, tok, enc_cache)
             if dual_window:
                 spans5, n_win, n_removed = run_layer_dual(text, tok, model, LAYERS[name], device,
-                                                           stride=stride)
+                                                           stride=stride, enc=enc)
                 layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v,
                                 "dual_window_agreement": agreement}
                                for s, e, c, v, agreement in spans5]
             else:
-                spans, n_win = run_layer(text, tok, model, LAYERS[name], device, stride=stride)
+                spans, n_win = run_layer(text, tok, model, LAYERS[name], device, stride=stride, enc=enc)
                 spans, n_removed = apply_linguistic_rules(spans, text, **rule_flags(LAYERS[name]))
                 layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v}
                                for s, e, c, v in spans]
@@ -353,6 +389,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "spans both runs agree on at high confidence; spans only one run "
                          "found are flagged dual_window_agreement for review. Roughly "
                          "doubles inference time per layer.")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="how many books to process at the same time, each in its own process. Default 1 "
+                         "(one book at a time). Every process loads its own copy of the models, about "
+                         "5.5 GB of RAM for all seven layers, so N workers need about N x 5.5 GB.")
+    ap.add_argument("--threads-per-worker", type=int, default=None,
+                    help="PyTorch threads in each worker process. Default: PyTorch's own default divided "
+                         "by --workers (at least 1), so the workers share the same cores.")
     return ap.parse_args(argv)
 
 
@@ -362,6 +405,63 @@ def _has_cuda() -> bool:
         return torch.cuda.is_available()
     except Exception:
         return False
+
+
+def error_summary(book_errors: dict[str, dict]) -> str | None:
+    """One warning line for the end of a run: how many books had a layer that failed (a failed layer
+    comes back empty and the run still exits 0, so this is the only sign in the console)."""
+    bad = {b: e for b, e in book_errors.items() if e}
+    if not bad:
+        return None
+    names = ", ".join(sorted(bad)[:5]) + (" ..." if len(bad) > 5 else "")
+    msg = f"{len(bad)} book(s) had layers that failed (see 'errors' in their predictions file): {names}"
+    if any("out of memory" in str(v).lower() for e in bad.values() for v in e.values()):
+        msg += ". Some layers ran out of memory: use fewer --workers (each worker needs about 10 GB of GPU memory)."
+    return msg
+
+
+def _write_prediction(out_path: Path, result: dict) -> None:
+    """Write a predictions file so that a crash never leaves a half-written one (the checkpoint
+    treats an existing file as done): write to a temporary name, then rename."""
+    tmp = out_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, out_path)
+
+
+def _init_worker(threads: int | None) -> None:
+    if threads:
+        import torch
+        torch.set_num_threads(threads)
+
+
+def _infer_file(job: tuple) -> tuple:
+    """One book in a worker process: returns (book_id, elapsed_s, counts, errors)."""
+    fp, out_dir, layer_names, device, stride, dual_window, ta = job
+    book = json.loads(Path(fp).read_text(encoding="utf-8"))
+    t0 = time.time()
+    result = infer_one(book, layer_names, device, stride=stride, dual_window=dual_window, ta=ta)
+    elapsed = time.time() - t0
+    _write_prediction(Path(out_dir) / f"{book['book_id']}.json", result)
+    counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
+    return book["book_id"], elapsed, counts, result["errors"]
+
+
+def run_in_pool(fn, jobs: list, workers: int, threads: int | None = None, start_method: str = "spawn"):
+    """Run fn(job) for every job in `workers` processes; yields (job, result, error) as each one
+    finishes. One failing job gives (job, None, error) and the others carry on. Each process
+    sets PyTorch to `threads` threads (None: leave PyTorch's default). "spawn" is used because
+    PyTorch (and CUDA) are not safe to fork."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    ctx = multiprocessing.get_context(start_method)
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_init_worker,
+                             initargs=(threads,)) as ex:
+        futures = {ex.submit(fn, job): job for job in jobs}
+        for fut in as_completed(futures):
+            try:
+                yield futures[fut], fut.result(), None
+            except Exception as e:  # one book failing must not stop the batch
+                yield futures[fut], None, e
 
 
 def main(argv=None) -> int:
@@ -384,29 +484,68 @@ def main(argv=None) -> int:
     except ValueError as e:
         raise SystemExit(str(e))
 
-    n_done = n_skipped = 0
-    for i, fp in enumerate(files, 1):
-        book = json.loads(fp.read_text(encoding="utf-8"))
-        book_id = book["book_id"]
-        if already_done(book_id, args.out):
-            print(f"[{i}/{len(files)}] {book_id}: already has predictions, skipping (checkpoint)")
-            n_skipped += 1
-            continue
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1")
+    n_done = n_skipped = n_failed = 0
+    book_errors: dict[str, dict] = {}
+    if args.workers == 1:
+        for i, fp in enumerate(files, 1):
+            book = json.loads(fp.read_text(encoding="utf-8"))
+            book_id = book["book_id"]
+            if already_done(book_id, args.out):
+                print(f"[{i}/{len(files)}] {book_id}: already has predictions, skipping (checkpoint)")
+                n_skipped += 1
+                continue
 
-        t0 = time.time()
-        result = infer_one(book, layer_names, args.device, stride=args.stride,
-                          dual_window=args.dual_window, ta=ta_options)
-        elapsed = time.time() - t0
-        out_path = args.out / f"{book_id}.json"
-        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            t0 = time.time()
+            result = infer_one(book, layer_names, args.device, stride=args.stride,
+                              dual_window=args.dual_window, ta=ta_options)
+            elapsed = time.time() - t0
+            _write_prediction(args.out / f"{book_id}.json", result)
 
-        counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
-        print(f"[{i}/{len(files)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
-              + (f"  errors={result['errors']}" if result["errors"] else ""))
-        n_done += 1
+            book_errors[book_id] = result["errors"]
+            counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
+            print(f"[{i}/{len(files)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
+                  + (f"  errors={result['errors']}" if result["errors"] else ""))
+            n_done += 1
+    else:
+        pending = []
+        for fp in files:
+            if already_done(fp.stem, args.out):
+                n_skipped += 1
+            else:
+                pending.append(fp)
+        if n_skipped:
+            print(f"{n_skipped} book(s) already have predictions, skipping (checkpoint)")
+        workers = min(args.workers, len(pending)) if pending else 0
+        if workers:
+            threads = args.threads_per_worker
+            if threads is None:
+                import torch
+                threads = max(1, torch.get_num_threads() // workers)
+            if args.device.startswith("cuda"):
+                print(f"  [note] {workers} workers share one GPU: each loads its own copy of the models "
+                      f"onto it", file=sys.stderr)
+            print(f"running {len(pending)} book(s) in {workers} worker process(es), {threads} thread(s) each")
+            jobs = [(fp, args.out, layer_names, args.device, args.stride, args.dual_window, ta_options)
+                    for fp in pending]
+            for k, (job, res, err) in enumerate(run_in_pool(_infer_file, jobs, workers, threads), 1):
+                if err is not None:
+                    print(f"[{k}/{len(pending)}] {job[0].stem}  FAILED: {err!r}", file=sys.stderr)
+                    n_failed += 1
+                    continue
+                book_id, elapsed, counts, errors = res
+                book_errors[book_id] = errors
+                print(f"[{k}/{len(pending)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
+                      + (f"  errors={errors}" if errors else ""))
+                n_done += 1
 
-    print(f"\ninferred {n_done} book(s), skipped {n_skipped} already done")
-    return 0
+    print(f"\ninferred {n_done} book(s), skipped {n_skipped} already done"
+          + (f", {n_failed} FAILED" if n_failed else ""))
+    warning = error_summary(book_errors)
+    if warning:
+        print(f"  [warn] {warning}", file=sys.stderr)
+    return 1 if n_failed else 0
 
 
 if __name__ == "__main__":

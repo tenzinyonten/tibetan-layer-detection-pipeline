@@ -9,7 +9,8 @@ from __future__ import annotations
 
 
 def infer_args(input_dir, out_dir, *, layers=None, all_layers=False, device=None, stride=None,
-               dual_window=False, author_span="last", title_model=None, author_model=None) -> list[str]:
+               dual_window=False, author_span="last", title_model=None, author_model=None,
+               workers=1, threads_per_worker=None) -> list[str]:
     argv = ["--input", str(input_dir), "--out", str(out_dir)]
     argv += ["--all"] if all_layers else ["--layers", *layers]
     if device:
@@ -18,6 +19,10 @@ def infer_args(input_dir, out_dir, *, layers=None, all_layers=False, device=None
         argv += ["--stride", str(stride)]
     if dual_window:
         argv.append("--dual-window")
+    if workers and workers > 1:
+        argv += ["--workers", str(workers)]
+    if threads_per_worker:
+        argv += ["--threads-per-worker", str(threads_per_worker)]
     argv += ["--author-span", author_span]
     for flag, val in (("--title-model", title_model), ("--author-model", author_model)):
         if val:
