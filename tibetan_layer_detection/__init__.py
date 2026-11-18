@@ -60,7 +60,7 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
         author model finds several. First suits whole books, where the gold author
         is on the title page.
     title_model / author_model: Hugging Face repo (or local folder) per field;
-        default is Yontenn/mmbert-title-only and Yontenn/mmbert-author-only
+        default is BDRC/Bo-Title-Detection and BDRC/Bo-Author-Detection
         (private; each needs HF_TOKEN or a stored login; one forward pass per
         model). The joint Yontenn/mmbert-title-author-run2 also works.
     title_author_opf: with write_opf, also write title and author as the

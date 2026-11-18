@@ -4,7 +4,7 @@ first and last 3,000 characters.
 Unlike the other layers this is not a sliding window over the whole book. The
 trained models (mmBERT-base) were trained on ONE sequence per work. By default
 there are two, each knowing one field with 3 labels (O, B, I):
-Yontenn/mmbert-title-only and Yontenn/mmbert-author-only, each decoded on its
+BDRC/Bo-Title-Detection and BDRC/Bo-Author-Detection, each decoded on its
 own forward pass. The earlier joint model Yontenn/mmbert-title-author-run2
 (5 labels: O, B/I-TITLE, B/I-AUTHOR) still works and gives both fields from one
 forward pass. The sequence is:
