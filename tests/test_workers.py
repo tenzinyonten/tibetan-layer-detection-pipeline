@@ -60,6 +60,26 @@ class Main(unittest.TestCase):
             self.assertEqual([f.name for f in Path(d).iterdir()], ["b.json"])
 
 
+class ErrorSummary(unittest.TestCase):
+    def test_no_errors_no_warning(self):
+        self.assertIsNone(infer.error_summary({"a": {}, "b": {}}))
+
+    def test_failed_layers_are_counted_and_named(self):
+        msg = infer.error_summary({"a": {}, "b": {"tsawa": "model load failed"}, "c": {"sabche": "inference failed"}})
+        self.assertIn("2 book(s)", msg)
+        self.assertIn("b, c", msg)
+        self.assertNotIn("--workers", msg)
+
+    def test_out_of_memory_suggests_fewer_workers(self):
+        msg = infer.error_summary({"a": {"tsawa": "inference failed: CUDA out of memory. Tried to allocate 2 GiB"}})
+        self.assertIn("fewer --workers", msg)
+
+    def test_a_long_list_of_books_is_shortened(self):
+        msg = infer.error_summary({f"b{i}": {"x": "e"} for i in range(9)})
+        self.assertIn("9 book(s)", msg)
+        self.assertTrue(msg.split(": ", 1)[1].startswith("b0, b1, b2, b3, b4 ..."))
+
+
 class Args(unittest.TestCase):
     def test_workers_are_passed_on_only_when_more_than_one(self):
         self.assertNotIn("--workers", stage_args.infer_args("p", "o", layers=["tsawa"]))

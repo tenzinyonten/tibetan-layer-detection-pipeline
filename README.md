@@ -15,6 +15,7 @@ OpenPecha `.opf` files.
 - [Usage](#usage)
 - [Title and author](#title-and-author)
 - [Speed and hardware](#speed-and-hardware)
+- [Parallel workers and threads](#parallel-workers-and-threads)
 - [Repository layout](#repository-layout)
 - [Notes](#notes)
 - [REST API + job queue](#rest-api--job-queue)
@@ -200,6 +201,42 @@ Measured on one real book, one run each:
 Title and author add only about 13 seconds, whatever the length. Quotation is the
 slowest layer because it uses a smaller stride and so more windows. A GPU is
 recommended for batches and for long books.
+
+## Parallel workers and threads
+
+Two separate settings, both ways of using several cores (or a GPU) at once:
+
+- **Threads** split one calculation. PyTorch spreads the maths of each window over several
+  cores and all of them share one copy of the models. It is automatic (6 threads on an Apple
+  M5 Pro); set it with `OMP_NUM_THREADS`.
+- **Workers** are separate copies of the pipeline, each processing its own books. Set it with
+  `--workers N` on `tibetan-infer` or `tibetan-detect`. The default is 1 (one book at a time).
+  Every worker loads its own copy of the models, so memory grows with N: about 5.5 GB of RAM
+  for all seven layers on a CPU, and about 10 GB of GPU memory on a GPU. `--threads-per-worker`
+  sets the threads in each worker; by default PyTorch's thread count is divided between them.
+
+```bash
+tibetan-infer --input preprocessed/ --out predictions/ --all --device cuda --workers 2
+```
+
+Workers need several books to work on; with one book there is nothing to hand out.
+
+**Measured (one run each).** All seven layers, 26 books of 12,000 characters, RTX 4090 (24 GB):
+
+| Workers | Wall time | Peak GPU memory | GPU busy | Result |
+|---|---|---|---|---|
+| 1 | 162 s | 9.9 GB | 50% | |
+| **2** | **114 s** | 19.8 GB | 84% | same predictions, 30% faster |
+| 3 | not valid | 24 GB (card full) | | layers ran out of memory and came back empty |
+
+Rule of thumb: workers <= GPU memory / 10 GB. On a CPU the gain is small: 4 books of 12,000
+characters, three layers, Apple M5 Pro: 1 worker 144 s, 2 workers 142 s, 4 workers 131 s with
+about 70% more CPU time. More threads in one process (`OMP_NUM_THREADS=12` instead of 6) saved
+about 12% on the same machine; 18 threads was slower than 12.
+
+A layer that fails (for example out of memory) comes back empty and the run still exits 0.
+The end of the run prints a warning with how many books were affected, and each affected
+predictions file lists the failed layers under `errors`.
 
 ## Repository layout
 

@@ -407,6 +407,19 @@ def _has_cuda() -> bool:
         return False
 
 
+def error_summary(book_errors: dict[str, dict]) -> str | None:
+    """One warning line for the end of a run: how many books had a layer that failed (a failed layer
+    comes back empty and the run still exits 0, so this is the only sign in the console)."""
+    bad = {b: e for b, e in book_errors.items() if e}
+    if not bad:
+        return None
+    names = ", ".join(sorted(bad)[:5]) + (" ..." if len(bad) > 5 else "")
+    msg = f"{len(bad)} book(s) had layers that failed (see 'errors' in their predictions file): {names}"
+    if any("out of memory" in str(v).lower() for e in bad.values() for v in e.values()):
+        msg += ". Some layers ran out of memory: use fewer --workers (each worker needs about 10 GB of GPU memory)."
+    return msg
+
+
 def _write_prediction(out_path: Path, result: dict) -> None:
     """Write a predictions file so that a crash never leaves a half-written one (the checkpoint
     treats an existing file as done): write to a temporary name, then rename."""
@@ -474,6 +487,7 @@ def main(argv=None) -> int:
     if args.workers < 1:
         raise SystemExit("--workers must be at least 1")
     n_done = n_skipped = n_failed = 0
+    book_errors: dict[str, dict] = {}
     if args.workers == 1:
         for i, fp in enumerate(files, 1):
             book = json.loads(fp.read_text(encoding="utf-8"))
@@ -489,6 +503,7 @@ def main(argv=None) -> int:
             elapsed = time.time() - t0
             _write_prediction(args.out / f"{book_id}.json", result)
 
+            book_errors[book_id] = result["errors"]
             counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
             print(f"[{i}/{len(files)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
                   + (f"  errors={result['errors']}" if result["errors"] else ""))
@@ -520,12 +535,16 @@ def main(argv=None) -> int:
                     n_failed += 1
                     continue
                 book_id, elapsed, counts, errors = res
+                book_errors[book_id] = errors
                 print(f"[{k}/{len(pending)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
                       + (f"  errors={errors}" if errors else ""))
                 n_done += 1
 
     print(f"\ninferred {n_done} book(s), skipped {n_skipped} already done"
           + (f", {n_failed} FAILED" if n_failed else ""))
+    warning = error_summary(book_errors)
+    if warning:
+        print(f"  [warn] {warning}", file=sys.stderr)
     return 1 if n_failed else 0
 
 
