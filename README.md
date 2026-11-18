@@ -46,6 +46,8 @@ text/.opf --[preprocess]--> preprocessed/*.json --[infer]--> predictions/*.json 
 
 `tibetan-detect` runs all three in sequence, for one-command use.
 
+A flowchart of the three stages and of what post-processing does, step by step: [docs/postprocessing_flow.md](docs/postprocessing_flow.md) (clean) and [docs/postprocessing_flow_fun.md](docs/postprocessing_flow_fun.md) (fun).
+
 ## Usage
 
 ```bash
