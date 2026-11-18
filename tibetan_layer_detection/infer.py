@@ -21,6 +21,11 @@ Usage (as an installed console script)
 ---------------------------------------
     tibetan-infer --input preprocessed/ --out predictions/ --all
     tibetan-infer --input preprocessed/ --out predictions/ --layers tsawa sabche --device cuda
+    tibetan-infer --input preprocessed/ --out predictions/ --all --workers 3   # 3 books at a time
+
+--workers N runs N books at the same time, each in its own process. Every process loads its
+own copy of the models (about 5.5 GB of RAM for all seven layers), so N books need about
+N x 5.5 GB. The default, 1, is the plain one-book-at-a-time loop.
 """
 
 from __future__ import annotations
@@ -353,6 +358,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "spans both runs agree on at high confidence; spans only one run "
                          "found are flagged dual_window_agreement for review. Roughly "
                          "doubles inference time per layer.")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="how many books to process at the same time, each in its own process. Default 1 "
+                         "(one book at a time). Every process loads its own copy of the models, about "
+                         "5.5 GB of RAM for all seven layers, so N workers need about N x 5.5 GB.")
+    ap.add_argument("--threads-per-worker", type=int, default=None,
+                    help="PyTorch threads in each worker process. Default: PyTorch's own default divided "
+                         "by --workers (at least 1), so the workers share the same cores.")
     return ap.parse_args(argv)
 
 
@@ -362,6 +374,50 @@ def _has_cuda() -> bool:
         return torch.cuda.is_available()
     except Exception:
         return False
+
+
+def _write_prediction(out_path: Path, result: dict) -> None:
+    """Write a predictions file so that a crash never leaves a half-written one (the checkpoint
+    treats an existing file as done): write to a temporary name, then rename."""
+    tmp = out_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, out_path)
+
+
+def _init_worker(threads: int | None) -> None:
+    if threads:
+        import torch
+        torch.set_num_threads(threads)
+
+
+def _infer_file(job: tuple) -> tuple:
+    """One book in a worker process: returns (book_id, elapsed_s, counts, errors)."""
+    fp, out_dir, layer_names, device, stride, dual_window, ta = job
+    book = json.loads(Path(fp).read_text(encoding="utf-8"))
+    t0 = time.time()
+    result = infer_one(book, layer_names, device, stride=stride, dual_window=dual_window, ta=ta)
+    elapsed = time.time() - t0
+    _write_prediction(Path(out_dir) / f"{book['book_id']}.json", result)
+    counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
+    return book["book_id"], elapsed, counts, result["errors"]
+
+
+def run_in_pool(fn, jobs: list, workers: int, threads: int | None = None, start_method: str = "spawn"):
+    """Run fn(job) for every job in `workers` processes; yields (job, result, error) as each one
+    finishes. One failing job gives (job, None, error) and the others carry on. Each process
+    sets PyTorch to `threads` threads (None: leave PyTorch's default). "spawn" is used because
+    PyTorch (and CUDA) are not safe to fork."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    ctx = multiprocessing.get_context(start_method)
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_init_worker,
+                             initargs=(threads,)) as ex:
+        futures = {ex.submit(fn, job): job for job in jobs}
+        for fut in as_completed(futures):
+            try:
+                yield futures[fut], fut.result(), None
+            except Exception as e:  # one book failing must not stop the batch
+                yield futures[fut], None, e
 
 
 def main(argv=None) -> int:
@@ -384,29 +440,62 @@ def main(argv=None) -> int:
     except ValueError as e:
         raise SystemExit(str(e))
 
-    n_done = n_skipped = 0
-    for i, fp in enumerate(files, 1):
-        book = json.loads(fp.read_text(encoding="utf-8"))
-        book_id = book["book_id"]
-        if already_done(book_id, args.out):
-            print(f"[{i}/{len(files)}] {book_id}: already has predictions, skipping (checkpoint)")
-            n_skipped += 1
-            continue
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1")
+    n_done = n_skipped = n_failed = 0
+    if args.workers == 1:
+        for i, fp in enumerate(files, 1):
+            book = json.loads(fp.read_text(encoding="utf-8"))
+            book_id = book["book_id"]
+            if already_done(book_id, args.out):
+                print(f"[{i}/{len(files)}] {book_id}: already has predictions, skipping (checkpoint)")
+                n_skipped += 1
+                continue
 
-        t0 = time.time()
-        result = infer_one(book, layer_names, args.device, stride=args.stride,
-                          dual_window=args.dual_window, ta=ta_options)
-        elapsed = time.time() - t0
-        out_path = args.out / f"{book_id}.json"
-        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            t0 = time.time()
+            result = infer_one(book, layer_names, args.device, stride=args.stride,
+                              dual_window=args.dual_window, ta=ta_options)
+            elapsed = time.time() - t0
+            _write_prediction(args.out / f"{book_id}.json", result)
 
-        counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
-        print(f"[{i}/{len(files)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
-              + (f"  errors={result['errors']}" if result["errors"] else ""))
-        n_done += 1
+            counts = {n: len(result["layers"].get(n, [])) for n in layer_names}
+            print(f"[{i}/{len(files)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
+                  + (f"  errors={result['errors']}" if result["errors"] else ""))
+            n_done += 1
+    else:
+        pending = []
+        for fp in files:
+            if already_done(fp.stem, args.out):
+                n_skipped += 1
+            else:
+                pending.append(fp)
+        if n_skipped:
+            print(f"{n_skipped} book(s) already have predictions, skipping (checkpoint)")
+        workers = min(args.workers, len(pending)) if pending else 0
+        if workers:
+            threads = args.threads_per_worker
+            if threads is None:
+                import torch
+                threads = max(1, torch.get_num_threads() // workers)
+            if args.device.startswith("cuda"):
+                print(f"  [note] {workers} workers share one GPU: each loads its own copy of the models "
+                      f"onto it", file=sys.stderr)
+            print(f"running {len(pending)} book(s) in {workers} worker process(es), {threads} thread(s) each")
+            jobs = [(fp, args.out, layer_names, args.device, args.stride, args.dual_window, ta_options)
+                    for fp in pending]
+            for k, (job, res, err) in enumerate(run_in_pool(_infer_file, jobs, workers, threads), 1):
+                if err is not None:
+                    print(f"[{k}/{len(pending)}] {job[0].stem}  FAILED: {err!r}", file=sys.stderr)
+                    n_failed += 1
+                    continue
+                book_id, elapsed, counts, errors = res
+                print(f"[{k}/{len(pending)}] {book_id}  ({elapsed:.1f}s)  spans={counts}"
+                      + (f"  errors={errors}" if errors else ""))
+                n_done += 1
 
-    print(f"\ninferred {n_done} book(s), skipped {n_skipped} already done")
-    return 0
+    print(f"\ninferred {n_done} book(s), skipped {n_skipped} already done"
+          + (f", {n_failed} FAILED" if n_failed else ""))
+    return 1 if n_failed else 0
 
 
 if __name__ == "__main__":

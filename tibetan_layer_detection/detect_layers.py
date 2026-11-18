@@ -67,6 +67,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--dual-window", action="store_true",
                     help="also run each layer at half window/stride size and flag spans "
                          "the two sizes disagree on; roughly doubles inference time")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="how many books to process at the same time (Stage 2), each in its own process "
+                         "with its own copy of the models (about 5.5 GB of RAM each). Default 1.")
+    ap.add_argument("--threads-per-worker", type=int, default=None,
+                    help="PyTorch threads per worker; default: PyTorch's default divided by --workers")
     return ap.parse_args(argv)
 
 
@@ -86,7 +91,8 @@ def main(argv=None) -> int:
     infer_argv = stage_args.infer_args(
         pre_dir, pred_dir, layers=args.layers, all_layers=args.all, device=args.device, stride=args.stride,
         dual_window=args.dual_window, author_span=args.author_span,
-        title_model=args.title_model, author_model=args.author_model)
+        title_model=args.title_model, author_model=args.author_model,
+        workers=args.workers, threads_per_worker=args.threads_per_worker)
     infer.main(infer_argv)
 
     print(f"\n{'='*60}\nSTAGE 3: postprocess\n{'='*60}")
