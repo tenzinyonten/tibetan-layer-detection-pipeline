@@ -24,6 +24,7 @@ from pathlib import Path
 from . import infer as _infer
 from . import postprocess as _postprocess
 from . import preprocess as _preprocess
+from . import stage_args as _args
 from .layer_config import LAYERS
 
 __all__ = ["detect", "LAYERS"]
@@ -34,10 +35,8 @@ _RESULT_EXCLUDE = {"_batch_summary.json"}
 
 def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: float = 0.7,
           write_json: bool = False, write_html: bool = False, write_opf: bool = False,
-          on_stage=None, title_author_system: str = "model", title_model: str | None = None,
-          author_model: str | None = None, title_author_skill_model: str | None = None,
-          title_author_skill_dir: str | None = None, title_author_opf: bool = False,
-          title_system: str | None = None, author_system: str | None = None,
+          on_stage=None, title_model: str | None = None, author_model: str | None = None,
+          title_author_opf: bool = False, author_span: str = "last",
           title_author_review_threshold: float | None = None):
     """Run the full three-stage pipeline in-process and return the result(s).
 
@@ -57,23 +56,16 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
     review_threshold: a span with confidence below this is flagged
         review_needed in the returned data (and in a persisted JSON file,
         if write_json=True).
-    title_author_system: "model" (default: the trained model, free and local),
-        "skill" (the LLM skill: PAID, one call per book, needs GEMINI_API_KEY or
-        ANTHROPIC_API_KEY in the environment) or "both" (title/author from the
-        model, title_skill/author_skill from the skill, side by side).
-    title_system / author_system: "model" or "skill" for one field (default: follow
-        title_author_system). title_system="model", author_system="skill" scored
-        best on the test split (title 0.842, author 0.756): a fixed choice per
-        field, not a rule per work; the skill part is PAID (one call per book,
-        about Rs 0.29 at the batch price, more for live calls). Cannot be
-        combined with title_author_system="both".
+    author_span: "last" (default) or "first": which author span to keep when the
+        author model finds several. First suits whole books, where the gold author
+        is on the title page.
     title_model / author_model: Hugging Face repo (or local folder) per field;
         default is Yontenn/mmbert-title-only and Yontenn/mmbert-author-only
         (private; each needs HF_TOKEN or a stored login; one forward pass per
-        model). The joint Yontenn/mmbert-title-author-run2 also works. title_author_skill_model / _skill_dir:
-        which LLM, and where title_author_skill.py lives, for skill / both.
-    title_author_opf: not implemented (the OpenPecha names are unknown); True
-        raises an error. title_author_review_threshold: a confidence below this
+        model). The joint Yontenn/mmbert-title-author-run2 also works.
+    title_author_opf: with write_opf, also write title and author as the
+        OpenPecha layers BookTitle.yml and Author.yml (off by default); needs
+        write_opf. title_author_review_threshold: a confidence below this
         flags a title/author span review_needed (default: review_threshold).
     write_json / write_html / write_opf: also persist Stage 3's JSON/HTML/
         .opf files under out_dir (see the tibetan-postprocess console
@@ -117,28 +109,16 @@ def detect(path, layers="all", *, out_dir=None, device=None, review_threshold: f
                    for fp in sorted(pre_dir.glob("*.json"))]
 
         _notify("infer", book_ids)
-        infer_argv = ["--input", str(pre_dir), "--out", str(pred_dir),
-                     "--layers", *layer_names, "--device", device,
-                     "--title-author-system", title_author_system]
-        for flag, val in (("--title-system", title_system), ("--author-system", author_system),
-                          ("--title-model", title_model), ("--author-model", author_model),
-                          ("--title-author-skill-model", title_author_skill_model),
-                          ("--title-author-skill-dir", title_author_skill_dir)):
-            if val:
-                infer_argv += [flag, str(val)]
+        infer_argv = _args.infer_args(pre_dir, pred_dir, layers=layer_names, device=device,
+                                      author_span=author_span, title_model=title_model,
+                                      author_model=author_model)
         _infer.main(infer_argv)
 
         _notify("postprocess", book_ids)
-        post_argv = ["--input", str(pred_dir), "--source", str(pre_dir), "--out", str(stage3_dir),
-                    "--review-threshold", str(review_threshold), "--json"]
-        if title_author_review_threshold is not None:
-            post_argv += ["--title-author-review-threshold", str(title_author_review_threshold)]
-        if title_author_opf:
-            post_argv.append("--title-author-opf")
-        if write_html:
-            post_argv.append("--html")
-        if write_opf:
-            post_argv.append("--opf")
+        post_argv = _args.postprocess_args(
+            pred_dir, pre_dir, stage3_dir, review_threshold=review_threshold,
+            title_author_review_threshold=title_author_review_threshold,
+            title_author_opf=title_author_opf, json=True, html=write_html, opf=write_opf)
         _postprocess.main(post_argv)
 
         book_files = [fp for fp in sorted(stage3_dir.glob("*.json"))

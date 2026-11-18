@@ -25,4 +25,4 @@ tibetan-postprocess = "tibetan_layer_detection.postprocess:main"
 tibetan-detect = "tibetan_layer_detection.detect_layers:main"
 
 [tool.setuptools]
-packages = ["tibetan_layer_detection"]
+packages = ["tibetan_layer_detection", "tibetan_layer_detection.postprocess"]

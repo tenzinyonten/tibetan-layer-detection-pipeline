@@ -47,6 +47,11 @@ class LayerConfig:
     extend_lone_fragments: bool = False  # with repair_fragments: also extend a short span with no cover
     # to the next shad/newline. Sabche test: recovers 1 heading but turns ~10 other fragments into
     # full-length false positives (F1 0.9642 -> 0.9630), so it is off.
+    min_confidence: float | None = None  # Stage 3 drops a span whose confidence is below this (a precision rule);
+    # None keeps every span (the review flag still marks the uncertain ones). Sabche: 0.85, chosen on the validation
+    # split (33 books) and confirmed on test (29 books). Validation F1 0.8486 -> 0.8535 (precision 0.868 -> 0.892,
+    # recall 0.830 -> 0.818, 37 of 3,091 real headings lost); test F1 0.9686 -> 0.9707 (precision 0.974 -> 0.981,
+    # recall 0.964 -> 0.961, 12 of 4,079 lost). Not measured for any other layer.
     shad_rule: bool = False  # drop a span under decode.SHAD_RULE_MAX_CHARS (8) chars unless a shad
     # follows it; a precision rule. Sabche test (29 books): P 0.9609 -> 0.9635, R 0.9696 unchanged,
     # F1 0.9652 -> 0.9665 (+0.0013; 11 false positives dropped, no true positives).
@@ -61,58 +66,39 @@ class LayerConfig:
 TITLE_MODEL = "Yontenn/mmbert-title-only"
 AUTHOR_MODEL = "Yontenn/mmbert-author-only"
 JOINT_MODEL = "Yontenn/mmbert-title-author-run2"
-TITLE_AUTHOR_MODEL = JOINT_MODEL  # the earlier name, kept for callers that import it
 TA_FIELDS = ("title", "author")
-TA_LAYER_NAMES = TA_FIELDS + tuple(f + "_skill" for f in TA_FIELDS)  # the _skill ones appear with system "both"
+TA_LAYER_NAMES = TA_FIELDS
+
+
+# The OpenPecha layer files for these two, as they are named in the real books (data/raw_opf: BookTitle.yml in
+# 527 of 539 books, Author.yml in 516).
+OPF_LAYER_NAMES = {"title": "BookTitle", "author": "Author"}
 
 
 def is_title_author(name: str) -> bool:
     return name in TA_LAYER_NAMES
 
 
-def base_layer(name: str) -> str:
-    """The LAYERS key a layer name styles/thresholds by: title_skill -> title."""
-    return name[:-len("_skill")] if name.endswith("_skill") and name[:-len("_skill")] in TA_FIELDS else name
-
-
 @dataclass
 class TitleAuthorOptions:
-    """How the title/author layers are run. Stage 2 reads system, the models and
-    the skill settings; Stage 3 reads opf and review_threshold. Defaults are free and local."""
-    system: str = "model"                  # a shortcut for both fields: "model", "skill", or "both" (the two systems side by side)
-    title_system: str | None = None        # "model" or "skill" for the title; None follows `system`
-    author_system: str | None = None       # "model" or "skill" for the author; None follows `system`. title "model" + author
-    # "skill" scored best on the test split (2,384 works): title 0.842, author 0.756. A fixed choice per field, not a rule per work.
+    """How the title/author layers are run. Stage 2 reads the models and crop settings;
+    Stage 3 reads opf and review_threshold. Everything runs locally from trained models."""
     title_model: str = TITLE_MODEL         # a Hugging Face repo, or a local folder
     author_model: str = AUTHOR_MODEL       # the joint JOINT_MODEL also works here; if both fields use it, one forward pass serves both
-    skill_model: str = "gemini-3.8-flash"  # only used by system "skill" / "both"; PAID, needs GEMINI_API_KEY or ANTHROPIC_API_KEY
-    skill_dir: str | None = None           # folder holding title_author_skill.py (default: TA_SKILL_DIR, else the repo's)
     crop_chars: int = 3000                 # characters kept at each end
     break_penalty: float | None = None     # Viterbi. None: per model -- 6 for a single-entity model, 12 for the joint
     # one (both picked on validation); a number applies to every model alike
+    author_span: str = "last"              # which author span to keep when the model finds several: "last" (the default, the
+    # rule for a single work) or "first". On whole OpenPecha books the gold author is on the title page, and "first" matched it
+    # about twice as often as "last" (35% against 17% strict offsets, 511 books, mostly seen in training); see title_author.py.
     strip_underscore: bool | None = None   # remove "_" from the input before tokenizing. None: per model -- yes for a
     # single-entity model (trained on text without them), no for the joint one
-    opf: bool = False                      # .opf output for title/author: not implemented, raises if switched on
+    opf: bool = False                      # also write title/author as BookTitle.yml / Author.yml with --opf (off by default)
     review_threshold: float | None = None  # None: the global review threshold (--review-threshold, 0.7)
 
     def __post_init__(self):
-        if self.system not in ("model", "skill", "both"):
-            raise ValueError(f"system must be model, skill or both, not {self.system!r}")
-        for name in ("title_system", "author_system"):
-            v = getattr(self, name)
-            if v not in (None, "model", "skill"):
-                raise ValueError(f"{name} must be model or skill, not {v!r}")
-        if self.system == "both" and (self.title_system or self.author_system):
-            raise ValueError("system 'both' runs the two systems side by side and cannot be combined with "
-                             "title_system / author_system (use those two alone to pick a system per field)")
-
-    @property
-    def side_by_side(self) -> bool:
-        return self.system == "both"
-
-    def field_system(self, field: str) -> str:
-        """"model" or "skill" for one field (never "both": that mode runs both systems for every field)."""
-        return getattr(self, field + "_system") or ("skill" if self.system == "skill" else "model")
+        if self.author_span not in ("first", "last"):
+            raise ValueError(f"author_span must be first or last, not {self.author_span!r}")
 
 
 LAYERS: dict[str, LayerConfig] = {
@@ -126,6 +112,7 @@ LAYERS: dict[str, LayerConfig] = {
         break_penalty=4.0, stride=5120, color="#4d9df5",  # blue
         source="BDRC/Bo-Sabche-detection training/test_metrics.json (decoding.break_penalty)",
         extend_to_tsheg=False, merge_small_gaps=False, repair_fragments=True, shad_rule=True,
+        min_confidence=0.85,
     ),
     "chapter": LayerConfig(
         repo="BDRC/Bo-Chapter-Detection", scheme="bio",
@@ -161,7 +148,7 @@ LAYERS: dict[str, LayerConfig] = {
     "author": LayerConfig(
         repo=AUTHOR_MODEL, scheme="ta", break_penalty=6.0, stride=0, color="#4dd8d8",  # teal
         source="Yontenn/mmbert-author-only, Viterbi break penalty 6 picked on validation; test author 0.734 "
-               "share correct (2,384 works; the joint model: 0.711; the skill: 0.756)",
+               "share correct (2,384 works; the joint model: 0.711)",
         kind="head_tail", extend_to_tsheg=False, merge_small_gaps=False,
         caveat="title/author reads only the first and last 3,000 characters and gives one author for the whole file",
     ),

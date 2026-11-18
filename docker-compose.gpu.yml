@@ -1,0 +1,17 @@
+# GPU override: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# Builds the worker with CUDA torch and gives it the NVIDIA GPU(s). The pipeline
+# picks "cuda" by itself when it is available. Needs an NVIDIA driver and the
+# NVIDIA Container Toolkit on the host. Not tested on a GPU machine yet.
+services:
+  worker:
+    build:
+      context: .
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
