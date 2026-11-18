@@ -63,8 +63,33 @@ def _window_logits(text_input_ids, offsets, w_start, w_end, cls_id, sep_id, pad_
     return logits[1:1 + n_content], content_off
 
 
+def _tokenizer_key(tok) -> str:
+    """A fingerprint of the whole tokenizer (vocabulary, rules and special tokens). Two tokenizers
+    with the same key tokenize every text identically, so one layer's tokens can serve another."""
+    key = _TOKENIZER_KEYS.get(id(tok))
+    if key is None:
+        import hashlib
+        key = hashlib.sha1(tok.backend_tokenizer.to_str().encode("utf-8")).hexdigest()
+        _TOKENIZER_KEYS[id(tok)] = key
+    return key
+
+
+_TOKENIZER_KEYS: dict[int, str] = {}  # id(tokenizer) -> key; tokenizers live as long as the process (_MODEL_CACHE)
+
+
+def encode_text(text: str, tok, cache: dict | None = None):
+    """Tokenize `text` with ids and character offsets. With a `cache` (one per book), a layer whose
+    tokenizer is identical to one already used on this text reuses the result instead of tokenizing again."""
+    if cache is None:
+        return tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    key = _tokenizer_key(tok)
+    if key not in cache:
+        cache[key] = tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    return cache[key]
+
+
 def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
-             stride: int | None = None, content_max: int = CONTENT_MAX,
+             stride: int | None = None, content_max: int = CONTENT_MAX, enc=None,
              ) -> tuple[list[tuple[int, int, float, int]], int]:
     """Returns (character spans as (start, end, confidence, window_votes)
     4-tuples, number of windows run).
@@ -74,6 +99,7 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
         sabche/chapter at 5120, quotation at 3613, yigchung at 4914 -- so
         omitting --stride is unchanged from before this option existed.
     content_max: window content size in tokens (CLS/SEP are added on top).
+    enc: the text already tokenized with this layer's tokenizer (see encode_text); None tokenizes here.
         Defaults to the shared CONTENT_MAX every layer trained at; passed
         smaller by run_layer_dual's half-size pass (--dual-window).
 
@@ -95,7 +121,8 @@ def run_layer(text: str, tok, model, cfg: LayerConfig, device: str,
 
     eff_stride = cfg.stride if stride is None else stride
     max_length = content_max + 2  # + CLS + SEP
-    enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
+    if enc is None:
+        enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
     input_ids = enc["input_ids"]
     offsets = [tuple(o) for o in enc["offset_mapping"]]
     cls_id, sep_id, pad_id = special_token_ids(tok)
@@ -173,7 +200,7 @@ def rule_flags(cfg: LayerConfig) -> dict:
 
 
 def run_layer_dual(text: str, tok, model, cfg: LayerConfig, device: str,
-                   stride: int | None = None,
+                   stride: int | None = None, enc=None,
                    ) -> tuple[list[tuple[int, int, float, int, str]], int, int]:
     """--dual-window: runs the layer twice, once at the normal (possibly
     --stride-overridden) window size and once at half window size / half
@@ -182,13 +209,15 @@ def run_layer_dual(text: str, tok, model, cfg: LayerConfig, device: str,
     trailing dual_window_agreement string, total windows run across both
     passes, total short spans removed across both passes)."""
     full_stride = cfg.stride if stride is None else stride
+    if enc is None:
+        enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)  # once for both passes
     full_spans, n_full = run_layer(text, tok, model, cfg, device, stride=full_stride,
-                                   content_max=CONTENT_MAX)
+                                   content_max=CONTENT_MAX, enc=enc)
     full_spans, n_removed_full = apply_linguistic_rules(full_spans, text, **rule_flags(cfg))
 
     half_stride = max(1, full_stride // 2)
     half_spans, n_half = run_layer(text, tok, model, cfg, device, stride=half_stride,
-                                   content_max=CONTENT_MAX // 2)
+                                   content_max=CONTENT_MAX // 2, enc=enc)
     half_spans, n_removed_half = apply_linguistic_rules(half_spans, text, **rule_flags(cfg))
 
     merged = merge_dual_window(full_spans, half_spans)
@@ -268,6 +297,7 @@ def infer_one(book: dict, layer_names: list[str], device: str,
     elapsed_s: dict[str, float] = {}
     short_spans_removed: dict[str, int] = {}
     errors: dict[str, str] = {}
+    enc_cache: dict = {}  # this book's tokens, shared by every layer with an identical tokenizer
     for name in layer_names:
         if LAYERS[name].kind == "head_tail":
             continue  # title/author: handled together below, one forward pass for both fields
@@ -279,14 +309,15 @@ def infer_one(book: dict, layer_names: list[str], device: str,
             print(f"  [warn] {book_id}: layer '{name}' skipped: {e}", file=sys.stderr)
             continue
         try:
+            enc = encode_text(text, tok, enc_cache)
             if dual_window:
                 spans5, n_win, n_removed = run_layer_dual(text, tok, model, LAYERS[name], device,
-                                                           stride=stride)
+                                                           stride=stride, enc=enc)
                 layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v,
                                 "dual_window_agreement": agreement}
                                for s, e, c, v, agreement in spans5]
             else:
-                spans, n_win = run_layer(text, tok, model, LAYERS[name], device, stride=stride)
+                spans, n_win = run_layer(text, tok, model, LAYERS[name], device, stride=stride, enc=enc)
                 spans, n_removed = apply_linguistic_rules(spans, text, **rule_flags(LAYERS[name]))
                 layers[name] = [{"start": s, "end": e, "confidence": c, "window_votes": v}
                                for s, e, c, v in spans]
