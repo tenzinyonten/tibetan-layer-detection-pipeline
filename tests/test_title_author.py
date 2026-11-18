@@ -300,7 +300,7 @@ class Config(unittest.TestCase):
     def test_defaults_are_free_and_local(self):
         o = TitleAuthorOptions()
         self.assertEqual((o.title_model, o.author_model, o.opf), (TITLE_MODEL, AUTHOR_MODEL, False))
-        self.assertEqual((TITLE_MODEL, AUTHOR_MODEL), ("Yontenn/mmbert-title-only", "Yontenn/mmbert-author-only"))
+        self.assertEqual((TITLE_MODEL, AUTHOR_MODEL), ("BDRC/Bo-Title-Detection", "BDRC/Bo-Author-Detection"))
         self.assertIsNone(o.break_penalty)                # per model: 6 single-entity, 12 joint
         self.assertEqual(o.author_span, "last")                 # unchanged until the choice is made
         with self.assertRaises(ValueError):

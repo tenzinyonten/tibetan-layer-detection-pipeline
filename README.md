@@ -28,8 +28,8 @@ OpenPecha `.opf` files.
 | Chapter | [BDRC/Bo-Chapter-Detection](https://huggingface.co/BDRC/Bo-Chapter-Detection) | Chapter and section titles | windows over the whole text |
 | Quotation | [BDRC/Bo-Quotation-Detection](https://huggingface.co/BDRC/Bo-Quotation-Detection) | Citations from other works | windows over the whole text |
 | Yigchung | [BDRC/Bo-Yigchung-Detection](https://huggingface.co/BDRC/Bo-Yigchung-Detection) | Small-print notes | windows over the whole text |
-| Title | `Yontenn/mmbert-title-only` (private) | The title of the work | first and last 3,000 characters; one span |
-| Author | `Yontenn/mmbert-author-only` (private) | The author of the work | first and last 3,000 characters; one span |
+| Title | [BDRC/Bo-Title-Detection](https://huggingface.co/BDRC/Bo-Title-Detection) (private) | The title of the work | first and last 3,000 characters; one span |
+| Author | [BDRC/Bo-Author-Detection](https://huggingface.co/BDRC/Bo-Author-Detection) (private) | The author of the work | first and last 3,000 characters; one span |
 
 Title and author are separate single-field models. A joint model that finds both
 in one pass, `Yontenn/mmbert-title-author-run2` (private), also works: pass it as
@@ -158,7 +158,7 @@ result = detect("book.txt", layers=["all"])
 result["layers"]["sabche"]
 # [{"start": 176, "end": 189, "confidence": 0.9974, "review_needed": False}, ...]
 result["layers"]["title"]
-# [{"start": 0, "end": 52, "confidence": 1.0, "block": "head", "model": "Yontenn/mmbert-title-only", "review_needed": False}]
+# [{"start": 0, "end": 52, "confidence": 1.0, "block": "head", "model": "BDRC/Bo-Title-Detection", "review_needed": False}]
 ```
 
 It runs all three stages in one process (a temporary folder, cleaned up, unless you
