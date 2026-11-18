@@ -10,7 +10,7 @@ flowchart LR
     A["Entry point<br/>tibetan-detect or detect()<br/>detect_layers.py"] --> S1
     S1["Stage 1: preprocess.py<br/>read .txt or OpenPecha book<br/>write preprocessed/ID.json"] --> S2
     S2["Stage 2: infer.py<br/>cut text into windows<br/>run each layer model<br/>Viterbi decode and per-layer cleanup<br/>write predictions/ID.json"] --> S3
-    S3["Stage 3: postprocess.py<br/>filter spans, flag for review<br/>write JSON, HTML, .opf"]
+    S3["Stage 3: postprocess/<br/>filter spans, flag for review<br/>write JSON, HTML, .opf"]
     S2 -. "tsawa also runs the quotation model" .-> S3
 ```
 
@@ -18,7 +18,7 @@ Stage 2 runs the quotation model together with tsawa (`layers_for_run` in `infer
 so Stage 3 can drop quoted tsawa. Title and author read only the first and last
 3,000 characters and give one span each.
 
-## 2. Stage 3 step by step (`postprocess.py`, `main()`)
+## 2. Stage 3 step by step (`postprocess/cli.py`, `main()`)
 
 ```mermaid
 flowchart TD
@@ -59,9 +59,9 @@ flowchart TD
 
 | Step | Function | File |
 |---|---|---|
-| Quoted tsawa drop | `split_quoted_tsawa` | `tibetan_layer_detection/postprocess.py` |
-| Short-span drop | `drop_short_spans` | `tibetan_layer_detection/postprocess.py` |
-| Non-Tibetan drop | `drop_non_tibetan_spans` | `tibetan_layer_detection/postprocess.py` |
-| Low-confidence drop | `drop_low_confidence` | `tibetan_layer_detection/postprocess.py` |
-| Review flags | `needs_review` | `tibetan_layer_detection/postprocess.py` |
+| Quoted tsawa drop | `split_quoted_tsawa` | `tibetan_layer_detection/postprocess/filters.py` |
+| Short-span drop | `drop_short_spans` | `tibetan_layer_detection/postprocess/filters.py` |
+| Non-Tibetan drop | `drop_non_tibetan_spans` | `tibetan_layer_detection/postprocess/filters.py` |
+| Low-confidence drop | `drop_low_confidence` | `tibetan_layer_detection/postprocess/filters.py` |
+| Review flags | `needs_review` | `tibetan_layer_detection/postprocess/review.py` |
 | Layer settings | `LAYERS` | `tibetan_layer_detection/layer_config.py` |

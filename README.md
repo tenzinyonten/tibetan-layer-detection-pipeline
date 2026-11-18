@@ -86,6 +86,27 @@ console scripts instead -- this function has no checkpointing.
 Each span carries a `confidence` (mean softmax probability of its
 Viterbi-decoded labels) and `review_needed` (`confidence < review_threshold`).
 
+## Repository layout
+
+```
+tibetan_layer_detection/
+  preprocess.py        Stage 1: read .txt / OpenPecha books
+  infer.py             Stage 2: windows, model inference, Viterbi, per-layer cleanup
+  windows.py, decode.py   windowing and span decoding used by Stage 2
+  title_author.py      title and author (first and last 3,000 characters)
+  postprocess/         Stage 3
+    filters.py           short / non-Tibetan / low-confidence / quoted-tsawa drops
+    review.py            review thresholds and review_needed flags
+    json_out.py, html_out.py, opf_out.py   the three outputs
+    cli.py               the tibetan-postprocess command and the per-book loop
+  detect_layers.py     tibetan-detect: runs the three stages in order
+  stage_args.py        the argument lists detect_layers and detect() pass to the stages
+  layer_config.py      every layer's model, decoding settings and rules
+api/                   REST API and job queue
+docs/                  flowcharts of the pipeline and of post-processing
+tests/                 unit tests (offline: no model downloads)
+```
+
 ## Notes
 
 - GPU recommended for books over 50K characters (CPU works but is slow).

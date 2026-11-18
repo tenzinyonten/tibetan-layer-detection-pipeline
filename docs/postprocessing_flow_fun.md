@@ -10,7 +10,7 @@ flowchart LR
     A(["🏁 tibetan-detect<br/>press go"]):::start --> S1
     S1["📥 Stage 1: preprocess.py<br/>Welcome, book! Let me read you."]:::stage --> S2
     S2["🧠 Stage 2: infer.py<br/>Cut into windows, ask the 7 models,<br/>Viterbi picks the best path"]:::stage --> S3
-    S3["🧼 Stage 3: postprocess.py<br/>The big clean-up and send-off"]:::stage
+    S3["🧼 Stage 3: postprocess/<br/>The big clean-up and send-off"]:::stage
     S2 -. "🔗 tsawa brings its friend quotation along" .-> S3
     classDef start fill:#ffe08a,stroke:#b8860b,color:#222
     classDef stage fill:#cfe8ff,stroke:#2b6cb0,color:#222
@@ -61,8 +61,8 @@ flowchart TD
 
 | Crew member | Function | File |
 |---|---|---|
-| 🧹 | `split_quoted_tsawa` | `tibetan_layer_detection/postprocess.py` |
-| ✂️ | `drop_short_spans` (title and author are safe) | `tibetan_layer_detection/postprocess.py` |
-| 🔤 | `drop_non_tibetan_spans` | `tibetan_layer_detection/postprocess.py` |
-| 🎯 | `drop_low_confidence` (Sabche, 0.85) | `tibetan_layer_detection/postprocess.py` |
-| 🚩 | `needs_review` | `tibetan_layer_detection/postprocess.py` |
+| 🧹 | `split_quoted_tsawa` | `tibetan_layer_detection/postprocess/filters.py` |
+| ✂️ | `drop_short_spans` (title and author are safe) | `tibetan_layer_detection/postprocess/filters.py` |
+| 🔤 | `drop_non_tibetan_spans` | `tibetan_layer_detection/postprocess/filters.py` |
+| 🎯 | `drop_low_confidence` (Sabche, 0.85) | `tibetan_layer_detection/postprocess/filters.py` |
+| 🚩 | `needs_review` | `tibetan_layer_detection/postprocess/review.py` |

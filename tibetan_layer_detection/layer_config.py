@@ -66,7 +66,6 @@ class LayerConfig:
 TITLE_MODEL = "Yontenn/mmbert-title-only"
 AUTHOR_MODEL = "Yontenn/mmbert-author-only"
 JOINT_MODEL = "Yontenn/mmbert-title-author-run2"
-TITLE_AUTHOR_MODEL = JOINT_MODEL  # the earlier name, kept for callers that import it
 TA_FIELDS = ("title", "author")
 TA_LAYER_NAMES = TA_FIELDS
 
