@@ -54,15 +54,14 @@ pip install .            # or `pip install -e .` while developing
 ```
 
 The models are downloaded from Hugging Face the first time they are used (roughly
-1 GB each) and kept in the Hugging Face cache. Several of them are private, so log in
+1 GB each) and kept in the Hugging Face cache. They are private, so log in
 first, or export a token:
 
 ```bash
 huggingface-cli login            # or: export HF_TOKEN=your_token_here
 ```
 
-The private models are Sabche, Chapter, Quotation, Title and Author. No key or
-token is ever stored by this package.
+No key or token is ever stored by this package.
 
 `pip install .` adds the `tibetan_layer_detection` package and four commands:
 `tibetan-detect`, `tibetan-preprocess`, `tibetan-infer` and `tibetan-postprocess`.
@@ -241,7 +240,7 @@ no auth, no database; Redis (via Celery's own result backend) holds all job
 state.
 
 ```bash
-export HF_TOKEN=your_token_here   # needed for the private models
+export HF_TOKEN=your_token_here   # needed to download the models
 docker-compose up
 ```
 
